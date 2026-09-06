@@ -340,6 +340,7 @@ def main():
 
     # BYPASS LOGIN FOR DEMO - Remove this when going live
     st.session_state['logged_in'] = True
+    st.session_state['user_email'] = "demo@bizbrain.ai"   # <-- ADD THIS LINE
 
     if not st.session_state['logged_in']:
         auth_page()
@@ -347,6 +348,3 @@ def main():
         st.caption("By continuing, you agree to our Terms of Service.")
     else:
         main_dashboard()
-
-if __name__ == "__main__":
-    main()
