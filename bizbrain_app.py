@@ -338,10 +338,9 @@ def main_dashboard():
 def main():
     init_db()
 
-# BYPASS LOGIN FOR DEMO - Remove this when going live
-st.session_state['logged_in'] = True
-st.session_state['user_email'] = "demo@bizbrain.ai"
-st.session_state['user_status'] = "active"   # <-- Bypasses database check
+    # BYPASS LOGIN FOR DEMO - Remove this when going live
+    st.session_state['logged_in'] = True
+    st.session_state['user_email'] = "demo@bizbrain.ai"   # <-- ADD THIS LINE
 
     if not st.session_state['logged_in']:
         auth_page()
