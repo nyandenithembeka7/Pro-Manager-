@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Pro Manager - AI Business Manager
-with 30-Day Free Trial + Data Source Switcher + Pitch Mode
+with 30-Day Free Trial + Data Source Switcher + Pitch Mode + Email Login Links
 Run with: streamlit run bizbrain_app.py
 """
 
@@ -17,55 +17,70 @@ import stripe
 import random
 import re
 import requests
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import hashlib
+import secrets
 
 # ------------------------------------------------------------
 # 1. CONFIGURATION
 # ------------------------------------------------------------
 APP_NAME = "Pro Manager"
-st.set_page_config(page_title=APP_NAME, layout="wide", page_icon="🧠")
+APP_URL = "https://pro-manager.streamlit.app"  # <-- CHANGE THIS TO YOUR URL!
+
+st.set_page_config(
+    page_title=APP_NAME, 
+    layout="wide", 
+    page_icon="🧠"
+)
+
+# Try to load logo if it exists
+try:
+    st.logo("logo.png", icon_image="logo.png")
+except:
+    pass  # No logo found, continue without it
+
+# ---- EMAIL CONFIGURATION ----
+# Replace with your Gmail credentials for sending login links
+EMAIL_SENDER = "your_email@gmail.com"
+EMAIL_PASSWORD = "your_app_password"  # Use Gmail App Password
 
 # ---- STRIPE CONFIGURATION ----
-STRIPE_PUBLISHABLE_KEY = "pk_test_..."  # Replace with your Stripe keys
+STRIPE_PUBLISHABLE_KEY = "pk_test_..."
 STRIPE_SECRET_KEY = "sk_test_..."
 stripe.api_key = STRIPE_SECRET_KEY
-MONTHLY_PRICE_ID = "price_123456789"    # Replace with your Price ID
+MONTHLY_PRICE_ID = "price_123456789"
 
 # ------------------------------------------------------------
-# 2. DATABASE SETUP (with Trial Support)
+# 2. DATABASE SETUP
 # ------------------------------------------------------------
 def init_db():
-    """
-    Safe database initializer.
-    - Creates the table if it doesn't exist.
-    - Adds any missing columns to existing tables (no data loss).
-    """
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    
-    # 1. Create the table with ALL columns if it doesn't exist
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (email TEXT PRIMARY KEY, 
                   password TEXT, 
                   stripe_customer_id TEXT,
                   subscription_status TEXT,
                   created_at TIMESTAMP,
-                  trial_end_date TIMESTAMP)''')
+                  trial_end_date TIMESTAMP,
+                  login_token TEXT,
+                  token_expiry TIMESTAMP)''')
     
-    # 2. Check which columns already exist in the old database
     c.execute("PRAGMA table_info(users)")
     existing_columns = [col[1] for col in c.fetchall()]
     
-    # 3. Define columns that might be missing (for upgrading old DBs)
     columns_to_check = {
         'stripe_customer_id': 'TEXT',
-        'trial_end_date': 'TIMESTAMP'
+        'trial_end_date': 'TIMESTAMP',
+        'login_token': 'TEXT',
+        'token_expiry': 'TIMESTAMP'
     }
     
-    # 4. Add any missing columns one by one (SAFE - keeps all data)
     for col, col_type in columns_to_check.items():
         if col not in existing_columns:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
-            print(f"✅ Database upgraded: added column '{col}'.")
     
     conn.commit()
     conn.close()
@@ -75,6 +90,10 @@ def hash_password(password):
 
 def verify_password(password, hashed):
     return bcrypt.checkpw(password.encode('utf-8'), hashed)
+
+def generate_login_token():
+    """Generate a secure random token for magic login links."""
+    return secrets.token_urlsafe(32)
 
 def signup_user(email, password):
     conn = sqlite3.connect('users.db')
@@ -86,7 +105,7 @@ def signup_user(email, password):
                   (email, hashed, 'trialing', datetime.now(), trial_end))
         conn.commit()
         conn.close()
-        return True, f"Account created! Your 30-day free trial starts now. Ends on {trial_end.strftime('%Y-%m-%d')}."
+        return True, f"Account created! Your 30-day free trial starts now."
     except sqlite3.IntegrityError:
         conn.close()
         return False, "Email already registered."
@@ -156,6 +175,70 @@ def get_trial_days_left(email):
         return max(0, remaining)
     return 0
 
+def save_login_token(email):
+    """Generate and save a login token for magic link."""
+    token = generate_login_token()
+    expiry = datetime.now() + timedelta(hours=24)  # Token valid for 24 hours
+    
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET login_token=?, token_expiry=? WHERE email=?", (token, expiry, email))
+    conn.commit()
+    conn.close()
+    return token
+
+def verify_login_token(token):
+    """Check if a login token is valid and return the email."""
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT email, token_expiry FROM users WHERE login_token=?", (token,))
+    result = c.fetchone()
+    conn.close()
+    
+    if result:
+        email, expiry = result
+        expiry = datetime.strptime(expiry, '%Y-%m-%d %H:%M:%S.%f') if expiry else None
+        if expiry and datetime.now() < expiry:
+            return email
+    return None
+
+def send_login_email(email, token):
+    """Send a magic login link via email."""
+    magic_link = f"{APP_URL}/?login_token={token}"
+    
+    subject = f"🔐 Login to {APP_NAME}"
+    body = f"""
+    <html>
+    <body>
+        <h2>Hello!</h2>
+        <p>Click the link below to log in to <strong>{APP_NAME}</strong>:</p>
+        <p><a href="{magic_link}">{magic_link}</a></p>
+        <p>This link will expire in 24 hours.</p>
+        <hr>
+        <p>If you didn't request this, please ignore this email.</p>
+    </body>
+    </html>
+    """
+    
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = email
+        msg['Subject'] = subject
+        
+        part = MIMEText(body, 'html')
+        msg.attach(part)
+        
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_SENDER, email, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"Email error: {e}")
+        return False
+
 # ------------------------------------------------------------
 # 3. STRIPE PAYMENT FUNCTIONS
 # ------------------------------------------------------------
@@ -168,8 +251,8 @@ def create_checkout_session(email):
                 'quantity': 1,
             }],
             mode='subscription',
-            success_url='http://localhost:8501/?success=true',
-            cancel_url='http://localhost:8501/?canceled=true',
+            success_url=APP_URL + '/?success=true',
+            cancel_url=APP_URL + '/?canceled=true',
             customer_email=email,
         )
         return checkout_session.url
@@ -187,7 +270,7 @@ def create_portal_session(email):
         try:
             session = stripe.billing_portal.Session.create(
                 customer=result[0],
-                return_url='http://localhost:8501/'
+                return_url=APP_URL + '/'
             )
             return session.url
         except:
@@ -195,10 +278,9 @@ def create_portal_session(email):
     return None
 
 # ------------------------------------------------------------
-# 4. DATA SOURCES (Demo, CSV, Shopify)
+# 4. DATA SOURCES
 # ------------------------------------------------------------
 def generate_demo_data():
-    """Generates realistic demo data."""
     products = [
         {"name": "Coffee Beans", "base_price": 12.50, "cost": 6.00, "lead_time": 5},
         {"name": "Green Tea", "base_price": 8.00, "cost": 3.50, "lead_time": 4},
@@ -228,7 +310,6 @@ def generate_demo_data():
     return pd.DataFrame(data)
 
 def fetch_shopify_data(store_name, access_token):
-    """Fetches products and orders from Shopify."""
     headers = {
         "X-Shopify-Access-Token": access_token,
         "Content-Type": "application/json"
@@ -340,7 +421,7 @@ def auth_page():
                 ok, msg = signup_user(email, password)
                 if ok:
                     st.success(msg)
-                    st.info("✅ Account created! Please switch to 'Login' and sign in to access your dashboard.")
+                    st.info("✅ Account created! Please log in.")
                 else:
                     st.error(msg)
     else:
@@ -353,6 +434,19 @@ def auth_page():
                 st.rerun()
             else:
                 st.error("Invalid credentials")
+        
+        # --- NEW: Send Login Link Email ---
+        st.markdown("---")
+        st.caption("Or get a magic login link emailed to you")
+        if st.button("📧 Send Login Link to Email"):
+            if re.match(r"[^@]+@[^@]+\.[^@]+", email):
+                token = save_login_token(email)
+                if send_login_email(email, token):
+                    st.success(f"✅ Login link sent to {email}! Check your inbox.")
+                else:
+                    st.error("❌ Failed to send email. Please check your email settings.")
+            else:
+                st.error("Please enter a valid email address first.")
 
 # ------------------------------------------------------------
 # 7. MAIN DASHBOARD
@@ -405,48 +499,47 @@ def main_dashboard():
             uploaded = st.file_uploader("Upload Inventory File", type=["csv", "xlsx"])
             if uploaded:
                 # --- Read the file (CSV or Excel) ---
-                if uploaded.name.endswith('.csv'):
-                    df = pd.read_csv(uploaded)
-                else:
-                    df = pd.read_excel(uploaded, engine='openpyxl')
-                
-                # --- SMART DETECTION: Is this monthly data? ---
-                month_cols = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-                existing_months = [col for col in month_cols if col in df.columns]
-                
-                if existing_months:
-                    # Transform monthly totals into daily sales!
-                    st.info(f"📆 Detected monthly data for {', '.join(existing_months)}. Converting to daily sales automatically...")
-                    daily_series = []
-                    for idx, row in df.iterrows():
-                        daily_list = []
-                        for month in existing_months:
-                            # Divide monthly sales by 30 to get a rough daily average
-                            daily_avg = max(1, int(row[month] / 30))
-                            daily_list.extend([daily_avg] * 30)
-                        df.at[idx, 'daily_sales'] = ','.join(map(str, daily_list))
+                try:
+                    if uploaded.name.endswith('.csv'):
+                        df = pd.read_csv(uploaded)
+                    else:
+                        df = pd.read_excel(uploaded, engine='openpyxl')
                     
-                    # --- Auto-fill missing columns with defaults (so you don't see errors) ---
-                    if 'selling_price' not in df.columns:
-                        df['selling_price'] = 15.0  # Default price
-                    if 'cost_per_unit' not in df.columns:
-                        df['cost_per_unit'] = 7.0   # Default cost
-                    if 'previous_cost_per_unit' not in df.columns:
-                        df['previous_cost_per_unit'] = df['cost_per_unit']
-                    if 'supplier_lead_time_days' not in df.columns:
-                        # Check if they have a delivery column, else default to 5
-                        if 'Delivery_Days' in df.columns:
-                            df['supplier_lead_time_days'] = df['Delivery_Days']
-                        else:
-                            df['supplier_lead_time_days'] = 5
+                    # --- SMART DETECTION: Is this monthly data? ---
+                    month_cols = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+                    existing_months = [col for col in month_cols if col in df.columns]
                     
-                    st.success("✅ Monthly data converted to daily sales! Your AI is ready.")
-                
-                # --- Normal daily sales data (already in correct format) ---
-                else:
-                    st.success("✅ Daily sales data loaded successfully!")
-                
-                source_label = "CSV Upload"
+                    if existing_months:
+                        st.info(f"📆 Detected monthly data for {', '.join(existing_months)}. Converting to daily sales automatically...")
+                        daily_series = []
+                        for idx, row in df.iterrows():
+                            daily_list = []
+                            for month in existing_months:
+                                daily_avg = max(1, int(row[month] / 30))
+                                daily_list.extend([daily_avg] * 30)
+                            df.at[idx, 'daily_sales'] = ','.join(map(str, daily_list))
+                        
+                        if 'selling_price' not in df.columns:
+                            df['selling_price'] = 15.0
+                        if 'cost_per_unit' not in df.columns:
+                            df['cost_per_unit'] = 7.0
+                        if 'previous_cost_per_unit' not in df.columns:
+                            df['previous_cost_per_unit'] = df['cost_per_unit']
+                        if 'supplier_lead_time_days' not in df.columns:
+                            if 'Delivery_Days' in df.columns:
+                                df['supplier_lead_time_days'] = df['Delivery_Days']
+                            else:
+                                df['supplier_lead_time_days'] = 5
+                        
+                        st.success("✅ Monthly data converted to daily sales!")
+                    else:
+                        st.success("✅ Daily sales data loaded successfully!")
+                    
+                    source_label = "CSV Upload"
+                except Exception as e:
+                    st.error(f"Error reading file: {e}. Make sure it's a valid CSV or Excel file.")
+                    df = generate_demo_data()
+                    source_label = "Demo (Error loading file)"
             else:
                 df = generate_demo_data()
                 source_label = "Demo (Waiting for CSV)"
@@ -529,7 +622,7 @@ def main_dashboard():
     ax.legend(); ax.grid(axis='y', linestyle='--', alpha=0.7)
     st.pyplot(fig)
 
-    # --- PITCH MODE: Audit Your Orders ---
+    # --- PITCH MODE ---
     st.divider()
     st.subheader("📊 Pitch Mode: Audit Your Orders (Compare AI vs Reality)")
     st.caption("Upload your actual purchase orders. The AI will tell you exactly how much money you wasted on over-ordering or lost on under-ordering.")
@@ -628,6 +721,20 @@ def main_dashboard():
 # ------------------------------------------------------------
 def main():
     init_db()
+    
+    # ---- Check for Magic Login Token in URL ----
+    query_params = st.query_params
+    if 'login_token' in query_params:
+        token = query_params['login_token']
+        email = verify_login_token(token)
+        if email:
+            st.session_state['logged_in'] = True
+            st.session_state['user_email'] = email
+            st.session_state['user_status'] = get_user_status(email)
+            st.query_params.clear()  # Remove token from URL
+            st.rerun()
+        else:
+            st.error("❌ Invalid or expired login link. Please log in manually.")
     
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
