@@ -338,8 +338,8 @@ def main_dashboard():
 def main():
     init_db()
     
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
+    # BYPASS LOGIN FOR DEMO - Remove this when going live
+st.session_state['logged_in'] = True
     
     if not st.session_state['logged_in']:
         auth_page()
