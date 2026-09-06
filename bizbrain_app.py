@@ -402,11 +402,51 @@ def main_dashboard():
                 source_label = "Demo (Waiting for Shopify)"
         
         elif source == "📂 Upload CSV":
-            uploaded = st.file_uploader("Upload Inventory CSV", type=["csv"])
+            uploaded = st.file_uploader("Upload Inventory File", type=["csv", "xlsx"])
             if uploaded:
-                df = pd.read_csv(uploaded)
+                # --- Read the file (CSV or Excel) ---
+                if uploaded.name.endswith('.csv'):
+                    df = pd.read_csv(uploaded)
+                else:
+                    df = pd.read_excel(uploaded, engine='openpyxl')
+                
+                # --- SMART DETECTION: Is this monthly data? ---
+                month_cols = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+                existing_months = [col for col in month_cols if col in df.columns]
+                
+                if existing_months:
+                    # Transform monthly totals into daily sales!
+                    st.info(f"📆 Detected monthly data for {', '.join(existing_months)}. Converting to daily sales automatically...")
+                    daily_series = []
+                    for idx, row in df.iterrows():
+                        daily_list = []
+                        for month in existing_months:
+                            # Divide monthly sales by 30 to get a rough daily average
+                            daily_avg = max(1, int(row[month] / 30))
+                            daily_list.extend([daily_avg] * 30)
+                        df.at[idx, 'daily_sales'] = ','.join(map(str, daily_list))
+                    
+                    # --- Auto-fill missing columns with defaults (so you don't see errors) ---
+                    if 'selling_price' not in df.columns:
+                        df['selling_price'] = 15.0  # Default price
+                    if 'cost_per_unit' not in df.columns:
+                        df['cost_per_unit'] = 7.0   # Default cost
+                    if 'previous_cost_per_unit' not in df.columns:
+                        df['previous_cost_per_unit'] = df['cost_per_unit']
+                    if 'supplier_lead_time_days' not in df.columns:
+                        # Check if they have a delivery column, else default to 5
+                        if 'Delivery_Days' in df.columns:
+                            df['supplier_lead_time_days'] = df['Delivery_Days']
+                        else:
+                            df['supplier_lead_time_days'] = 5
+                    
+                    st.success("✅ Monthly data converted to daily sales! Your AI is ready.")
+                
+                # --- Normal daily sales data (already in correct format) ---
+                else:
+                    st.success("✅ Daily sales data loaded successfully!")
+                
                 source_label = "CSV Upload"
-                st.success("✅ CSV loaded!")
             else:
                 df = generate_demo_data()
                 source_label = "Demo (Waiting for CSV)"
