@@ -1,6 +1,6 @@
-streamlit
 pandas
-numpy
 matplotlib
-stripe
 bcrypt
+stripe
+requests
+openpyxl
