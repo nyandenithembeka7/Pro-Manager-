@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Pro Manager - AI Business Manager (with 30-Day Free Trial)
+Pro Manager - AI Business Manager
+with 30-Day Free Trial + Data Source Switcher + Pitch Mode
 Run with: streamlit run bizbrain_app.py
 """
 
@@ -15,20 +16,19 @@ import bcrypt
 import stripe
 import random
 import re
+import requests
 
 # ------------------------------------------------------------
 # 1. CONFIGURATION
 # ------------------------------------------------------------
-APP_NAME = "Pro Manager"  # <-- NEW NAME!
+APP_NAME = "Pro Manager"
 st.set_page_config(page_title=APP_NAME, layout="wide", page_icon="🧠")
 
-# ---- STRIPE CONFIGURATION (Replace with your live keys later) ----
-STRIPE_PUBLISHABLE_KEY = "pk_test_..."  # From Stripe Dashboard
-STRIPE_SECRET_KEY = "sk_test_..."       # From Stripe Dashboard
+# ---- STRIPE CONFIGURATION ----
+STRIPE_PUBLISHABLE_KEY = "pk_test_..."  # Replace with your Stripe keys
+STRIPE_SECRET_KEY = "sk_test_..."
 stripe.api_key = STRIPE_SECRET_KEY
-
-# Your Stripe Price ID (Create this in Stripe Dashboard)
-MONTHLY_PRICE_ID = "price_123456789"    # Replace with your actual Price ID
+MONTHLY_PRICE_ID = "price_123456789"    # Replace with your Price ID
 
 # ------------------------------------------------------------
 # 2. DATABASE SETUP (with Trial Support)
@@ -36,12 +36,11 @@ MONTHLY_PRICE_ID = "price_123456789"    # Replace with your actual Price ID
 def init_db():
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    # Added trial_end_date column
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (email TEXT PRIMARY KEY, 
                   password TEXT, 
                   stripe_customer_id TEXT,
-                  subscription_status TEXT,  -- 'active', 'trialing', 'inactive'
+                  subscription_status TEXT,
                   created_at TIMESTAMP,
                   trial_end_date TIMESTAMP)''')
     conn.commit()
@@ -58,7 +57,7 @@ def signup_user(email, password):
     c = conn.cursor()
     try:
         hashed = hash_password(password)
-        trial_end = datetime.now() + timedelta(days=30)  # 30-day free trial
+        trial_end = datetime.now() + timedelta(days=30)
         c.execute("INSERT INTO users (email, password, subscription_status, created_at, trial_end_date) VALUES (?, ?, ?, ?, ?)",
                   (email, hashed, 'trialing', datetime.now(), trial_end))
         conn.commit()
@@ -82,9 +81,7 @@ def login_user(email, password):
         status = user[1]
         trial_end = datetime.strptime(user[2], '%Y-%m-%d %H:%M:%S.%f') if user[2] else None
         
-        # --- Check if trial has expired ---
         if status == 'trialing' and trial_end and datetime.now() > trial_end:
-            # Automatically expire the trial
             conn = sqlite3.connect('users.db')
             c = conn.cursor()
             c.execute("UPDATE users SET subscription_status='inactive' WHERE email=?", (email,))
@@ -103,7 +100,6 @@ def update_subscription(email, status, customer_id=None):
         c.execute("UPDATE users SET subscription_status=?, stripe_customer_id=? WHERE email=?", (status, customer_id, email))
     else:
         c.execute("UPDATE users SET subscription_status=? WHERE email=?", (status, email))
-    # Clear trial end date if they become active
     if status == 'active':
         c.execute("UPDATE users SET trial_end_date=NULL WHERE email=?", (email,))
     conn.commit()
@@ -116,7 +112,6 @@ def get_user_status(email):
     status = user[1]
     trial_end = datetime.strptime(user[2], '%Y-%m-%d %H:%M:%S.%f') if user[2] else None
     
-    # Auto-expire if trial ended
     if status == 'trialing' and trial_end and datetime.now() > trial_end:
         conn = sqlite3.connect('users.db')
         c = conn.cursor()
@@ -176,9 +171,10 @@ def create_portal_session(email):
     return None
 
 # ------------------------------------------------------------
-# 4. INVENTORY AI ENGINE (Same as before)
+# 4. DATA SOURCES (Demo, CSV, Shopify)
 # ------------------------------------------------------------
 def generate_demo_data():
+    """Generates realistic demo data."""
     products = [
         {"name": "Coffee Beans", "base_price": 12.50, "cost": 6.00, "lead_time": 5},
         {"name": "Green Tea", "base_price": 8.00, "cost": 3.50, "lead_time": 4},
@@ -207,6 +203,61 @@ def generate_demo_data():
         })
     return pd.DataFrame(data)
 
+def fetch_shopify_data(store_name, access_token):
+    """Fetches products and orders from Shopify."""
+    headers = {
+        "X-Shopify-Access-Token": access_token,
+        "Content-Type": "application/json"
+    }
+    base_url = f"https://{store_name}.myshopify.com/admin/api/2024-01"
+    
+    try:
+        prod_resp = requests.get(f"{base_url}/products.json?limit=50", headers=headers, timeout=10)
+        prod_resp.raise_for_status()
+        products = prod_resp.json()["products"]
+        
+        orders_resp = requests.get(
+            f"{base_url}/orders.json?status=any&created_at_min={(datetime.now() - timedelta(days=30)).isoformat()}",
+            headers=headers,
+            timeout=10
+        )
+        orders_resp.raise_for_status()
+        orders = orders_resp.json()["orders"]
+        
+        rows = []
+        for p in products:
+            variant = p["variants"][0] if p["variants"] else {}
+            sku = variant.get("sku", p["handle"])
+            
+            daily_sales = [0] * 30
+            for order in orders:
+                if order["financial_status"] in ["paid", "pending"]:
+                    for item in order["line_items"]:
+                        if item["sku"] == sku or item["product_id"] == p["id"]:
+                            qty = item["quantity"]
+                            day_index = min(29, (datetime.now() - datetime.fromisoformat(order["created_at"].replace("Z", "+00:00"))).days)
+                            if day_index < 30:
+                                daily_sales[day_index] += qty
+            
+            daily_sales = daily_sales[::-1]
+            
+            rows.append({
+                "product_name": p["title"],
+                "current_stock": variant.get("inventory_quantity", 0),
+                "selling_price": float(variant.get("price", 0)),
+                "cost_per_unit": float(variant.get("cost", 0) or 0),
+                "previous_cost_per_unit": float(variant.get("cost", 0) or 0),
+                "supplier_lead_time_days": 5,
+                "daily_sales": ",".join(map(str, daily_sales))
+            })
+        return pd.DataFrame(rows)
+    except Exception as e:
+        st.error(f"Shopify API error: {e}")
+        return None
+
+# ------------------------------------------------------------
+# 5. INVENTORY AI ENGINE
+# ------------------------------------------------------------
 def process_data(df):
     df = df.copy()
     df['sales_history'] = df['daily_sales'].apply(lambda x: [int(v) for v in x.split(',')] if isinstance(x, str) else [0])
@@ -245,7 +296,7 @@ def generate_alerts(df):
     return alerts
 
 # ------------------------------------------------------------
-# 5. AUTH UI (Login / Signup)
+# 6. AUTH UI
 # ------------------------------------------------------------
 def auth_page():
     st.subheader(f"🔐 Welcome to {APP_NAME}")
@@ -280,17 +331,69 @@ def auth_page():
                 st.error("Invalid credentials")
 
 # ------------------------------------------------------------
-# 6. MAIN DASHBOARD (with Trial Banner)
+# 7. MAIN DASHBOARD
 # ------------------------------------------------------------
 def main_dashboard():
     st.title(f"🧠 {APP_NAME}")
     st.caption("AI-powered inventory & money leak detection.")
 
-    # --- Check User Status & Trial ---
     email = st.session_state['user_email']
     status = get_user_status(email)
     trial_days = get_trial_days_left(email)
     
+    # --- SIDEBAR: DATA SOURCE SWITCHER ---
+    with st.sidebar:
+        st.header("🔌 Data Source")
+        
+        source = st.radio(
+            "Choose your data source:",
+            ["📊 Demo Store (Mock Data)", "🛒 Shopify (Live)", "📂 Upload CSV"]
+        )
+        
+        df = None
+        source_label = "Demo"
+        
+        if source == "📊 Demo Store (Mock Data)":
+            df = generate_demo_data()
+            source_label = "Demo (Dynamic Mock)"
+            st.success("✅ Running on realistic demo data.")
+        
+        elif source == "🛒 Shopify (Live)":
+            st.subheader("Shopify Credentials")
+            store = st.text_input("Store Name (e.g., my-store)")
+            token = st.text_input("Access Token", type="password")
+            if st.button("Fetch Live Data"):
+                if store and token:
+                    with st.spinner("Connecting to Shopify..."):
+                        df = fetch_shopify_data(store, token)
+                        if df is not None and not df.empty:
+                            source_label = "Shopify Live"
+                            st.success("✅ Data loaded from Shopify!")
+                        else:
+                            st.error("No data fetched. Check credentials.")
+                else:
+                    st.warning("Enter store name and access token.")
+            if df is None:
+                df = generate_demo_data()
+                source_label = "Demo (Waiting for Shopify)"
+        
+        elif source == "📂 Upload CSV":
+            uploaded = st.file_uploader("Upload Inventory CSV", type=["csv"])
+            if uploaded:
+                df = pd.read_csv(uploaded)
+                source_label = "CSV Upload"
+                st.success("✅ CSV loaded!")
+            else:
+                df = generate_demo_data()
+                source_label = "Demo (Waiting for CSV)"
+        
+        if df is None or df.empty:
+            df = generate_demo_data()
+            source_label = "Demo (Fallback)"
+        
+        st.markdown("---")
+        st.caption("📊 Data source: " + source_label)
+
     # --- Status Bar ---
     col_status, col_button = st.columns([3, 1])
     with col_status:
@@ -305,7 +408,7 @@ def main_dashboard():
             st.session_state['logged_in'] = False
             st.rerun()
 
-    # --- PAYWALL: If inactive, block access ---
+    # --- PAYWALL ---
     if status == 'inactive':
         st.divider()
         st.error("❌ Your free trial has expired or you have no active subscription.")
@@ -322,14 +425,12 @@ def main_dashboard():
                     st.info(f"Click the link to subscribe: {url}")
                 else:
                     st.error("Failed to create checkout session. Check your Stripe keys.")
-        st.stop()  # Stop rendering the dashboard
-    
-    # --- If Active or Trialing: Show Full Dashboard ---
+        st.stop()
+
     if status == 'trialing':
         st.info(f"🎉 You are on a {trial_days}-day free trial. No charges yet. Subscribe anytime to keep access after {trial_days} days.")
     
-    # --- Data & Analysis ---
-    df = generate_demo_data()
+    # --- Process Data ---
     df_processed = process_data(df)
     alerts = generate_alerts(df_processed)
 
@@ -364,9 +465,7 @@ def main_dashboard():
     ax.legend(); ax.grid(axis='y', linestyle='--', alpha=0.7)
     st.pyplot(fig)
 
-    # ------------------------------------------------------------
-    # NEW: PITCH MODE - Upload Purchase Orders vs Sales
-    # ------------------------------------------------------------
+    # --- PITCH MODE: Audit Your Orders ---
     st.divider()
     st.subheader("📊 Pitch Mode: Audit Your Orders (Compare AI vs Reality)")
     st.caption("Upload your actual purchase orders. The AI will tell you exactly how much money you wasted on over-ordering or lost on under-ordering.")
@@ -434,7 +533,7 @@ def main_dashboard():
     else:
         st.info("Upload both files to see how much money you are currently leaking.")
 
-    # ---- STRIPE SUBSCRIPTION BUTTON (for users who want to upgrade from trial) ----
+    # --- STRIPE SUBSCRIPTION ---
     st.divider()
     st.subheader("💳 Upgrade to Paid Plan")
     
@@ -461,7 +560,7 @@ def main_dashboard():
                     st.error("Failed to create checkout session. Check your Stripe keys.")
 
 # ------------------------------------------------------------
-# 7. APP ROUTER
+# 8. APP ROUTER
 # ------------------------------------------------------------
 def main():
     init_db()
