@@ -34,8 +34,15 @@ MONTHLY_PRICE_ID = "price_123456789"    # Replace with your Price ID
 # 2. DATABASE SETUP (with Trial Support)
 # ------------------------------------------------------------
 def init_db():
+    """
+    Safe database initializer.
+    - Creates the table if it doesn't exist.
+    - Adds any missing columns to existing tables (no data loss).
+    """
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
+    
+    # 1. Create the table with ALL columns if it doesn't exist
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (email TEXT PRIMARY KEY, 
                   password TEXT, 
@@ -43,6 +50,23 @@ def init_db():
                   subscription_status TEXT,
                   created_at TIMESTAMP,
                   trial_end_date TIMESTAMP)''')
+    
+    # 2. Check which columns already exist in the old database
+    c.execute("PRAGMA table_info(users)")
+    existing_columns = [col[1] for col in c.fetchall()]
+    
+    # 3. Define columns that might be missing (for upgrading old DBs)
+    columns_to_check = {
+        'stripe_customer_id': 'TEXT',
+        'trial_end_date': 'TIMESTAMP'
+    }
+    
+    # 4. Add any missing columns one by one (SAFE - keeps all data)
+    for col, col_type in columns_to_check.items():
+        if col not in existing_columns:
+            c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+            print(f"✅ Database upgraded: added column '{col}'.")
+    
     conn.commit()
     conn.close()
 
