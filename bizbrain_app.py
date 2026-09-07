@@ -1,750 +1,3306 @@
 #!/usr/bin/env python3
 """
 Pro Manager - AI Business Manager
-with 30-Day Free Trial + Data Source Switcher + Pitch Mode + Email Login Links
-Run with: streamlit run bizbrain_app.py
+---------------------------------
+Inventory intelligence + money leak detection + business insights.
+
+Run locally:
+    streamlit run bizbrain_app.py
+
+This version includes:
+- 30-day free trial
+- Password login
+- Secure password hashing
+- Magic email login links
+- Demo business data
+- CSV upload
+- Excel upload
+- Inventory analysis
+- Demand forecasting
+- Low-stock detection
+- Overstock detection
+- Dead-stock detection
+- Supplier cost increase detection
+- Profit margin analysis
+- Money-leak detection
+- Business insights
+- Pitch/Audit Mode
+- Stripe Checkout
+- Stripe customer portal
+- Safer configuration through Streamlit secrets
+- Better error handling
 """
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-from io import StringIO
-import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
-import sqlite3
-import bcrypt
-import stripe
-import random
+# ============================================================
+# 1. IMPORTS
+# ============================================================
+
+import os
 import re
-import requests
+import secrets
+import sqlite3
+import hashlib
 import smtplib
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import hashlib
-import secrets
 
-# ------------------------------------------------------------
-# 1. CONFIGURATION
-# ------------------------------------------------------------
+import numpy as np
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
+
+try:
+    import bcrypt
+except ImportError:
+    bcrypt = None
+
+try:
+    import stripe
+except ImportError:
+    stripe = None
+
+
+# ============================================================
+# 2. APP CONFIGURATION
+# ============================================================
+
 APP_NAME = "Pro Manager"
-APP_URL = "https://pro-manager.streamlit.app"  # <-- CHANGE THIS TO YOUR URL!
+
+# Change this after deployment.
+APP_URL = "https://pro-manager.streamlit.app"
+
+TRIAL_DAYS = 30
+MAGIC_LINK_HOURS = 24
+MONTHLY_PRICE_DISPLAY = "R499 / month"
 
 st.set_page_config(
-    page_title=APP_NAME, 
-    layout="wide", 
-    page_icon="🧠"
+    page_title=APP_NAME,
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# Try to load logo if it exists
+
+# ============================================================
+# 3. OPTIONAL LOGO
+# ============================================================
+
 try:
     st.logo("logo.png", icon_image="logo.png")
-except:
-    pass  # No logo found, continue without it
+except Exception:
+    pass
 
-# ---- EMAIL CONFIGURATION ----
-# Replace with your Gmail credentials for sending login links
-EMAIL_SENDER = "your_email@gmail.com"
-EMAIL_PASSWORD = "your_app_password"  # Use Gmail App Password
 
-# ---- STRIPE CONFIGURATION ----
-STRIPE_PUBLISHABLE_KEY = "pk_test_..."
-STRIPE_SECRET_KEY = "sk_test_..."
-stripe.api_key = STRIPE_SECRET_KEY
-MONTHLY_PRICE_ID = "price_123456789"
+# ============================================================
+# 4. SECRETS / CONFIGURATION
+# ============================================================
 
-# ------------------------------------------------------------
-# 2. DATABASE SETUP
-# ------------------------------------------------------------
+def get_secret(name, default=""):
+    """
+    Safely read a value from Streamlit secrets first,
+    then environment variables.
+
+    This prevents passwords/API keys from being hard-coded
+    into the application.
+    """
+
+    try:
+        value = st.secrets.get(name, None)
+        if value is not None:
+            return value
+    except Exception:
+        pass
+
+    return os.getenv(name, default)
+
+
+EMAIL_SENDER = get_secret("EMAIL_SENDER")
+EMAIL_PASSWORD = get_secret("EMAIL_PASSWORD")
+
+STRIPE_PUBLISHABLE_KEY = get_secret("STRIPE_PUBLISHABLE_KEY")
+STRIPE_SECRET_KEY = get_secret("STRIPE_SECRET_KEY")
+MONTHLY_PRICE_ID = get_secret("MONTHLY_PRICE_ID")
+
+if stripe is not None and STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+
+
+# ============================================================
+# 5. DATABASE
+# ============================================================
+
+DB_FILE = "users.db"
+
+
+def get_connection():
+    """
+    Creates a SQLite connection.
+
+    SQLite is suitable for our prototype.
+    We should replace it with a hosted database before
+    scaling to many paying customers.
+    """
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def init_db():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (email TEXT PRIMARY KEY, 
-                  password TEXT, 
-                  stripe_customer_id TEXT,
-                  subscription_status TEXT,
-                  created_at TIMESTAMP,
-                  trial_end_date TIMESTAMP,
-                  login_token TEXT,
-                  token_expiry TIMESTAMP)''')
-    
-    c.execute("PRAGMA table_info(users)")
-    existing_columns = [col[1] for col in c.fetchall()]
-    
-    columns_to_check = {
-        'stripe_customer_id': 'TEXT',
-        'trial_end_date': 'TIMESTAMP',
-        'login_token': 'TEXT',
-        'token_expiry': 'TIMESTAMP'
-    }
-    
-    for col, col_type in columns_to_check.items():
-        if col not in existing_columns:
-            c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
-    
+    """
+    Create the users table if it does not exist.
+    """
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            email TEXT PRIMARY KEY,
+            password TEXT,
+            stripe_customer_id TEXT,
+            subscription_status TEXT DEFAULT 'trialing',
+            created_at TEXT,
+            trial_end_date TEXT,
+            login_token TEXT,
+            token_expiry TEXT
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
+
+
+# ============================================================
+# 6. PASSWORD SECURITY
+# ============================================================
 
 def hash_password(password):
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+    """
+    Hash a password using bcrypt.
+    """
+
+    if bcrypt is None:
+        raise RuntimeError(
+            "bcrypt is not installed. Run: pip install bcrypt"
+        )
+
+    return bcrypt.hashpw(
+        password.encode("utf-8"),
+        bcrypt.gensalt()
+    ).decode("utf-8")
+
 
 def verify_password(password, hashed):
-    return bcrypt.checkpw(password.encode('utf-8'), hashed)
-
-def generate_login_token():
-    """Generate a secure random token for magic login links."""
-    return secrets.token_urlsafe(32)
-
-def signup_user(email, password):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    try:
-        hashed = hash_password(password)
-        trial_end = datetime.now() + timedelta(days=30)
-        c.execute("INSERT INTO users (email, password, subscription_status, created_at, trial_end_date) VALUES (?, ?, ?, ?, ?)",
-                  (email, hashed, 'trialing', datetime.now(), trial_end))
-        conn.commit()
-        conn.close()
-        return True, f"Account created! Your 30-day free trial starts now."
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False, "Email already registered."
-
-def get_user(email):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("SELECT password, subscription_status, trial_end_date FROM users WHERE email=?", (email,))
-    result = c.fetchone()
-    conn.close()
-    return result
-
-def login_user(email, password):
-    user = get_user(email)
-    if user and verify_password(password, user[0]):
-        status = user[1]
-        trial_end = datetime.strptime(user[2], '%Y-%m-%d %H:%M:%S.%f') if user[2] else None
-        
-        if status == 'trialing' and trial_end and datetime.now() > trial_end:
-            conn = sqlite3.connect('users.db')
-            c = conn.cursor()
-            c.execute("UPDATE users SET subscription_status='inactive' WHERE email=?", (email,))
-            conn.commit()
-            conn.close()
-            status = 'inactive'
-            return True, 'inactive'
-        
-        return True, status
-    return False, None
-
-def update_subscription(email, status, customer_id=None):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    if customer_id:
-        c.execute("UPDATE users SET subscription_status=?, stripe_customer_id=? WHERE email=?", (status, customer_id, email))
-    else:
-        c.execute("UPDATE users SET subscription_status=? WHERE email=?", (status, email))
-    if status == 'active':
-        c.execute("UPDATE users SET trial_end_date=NULL WHERE email=?", (email,))
-    conn.commit()
-    conn.close()
-
-def get_user_status(email):
-    user = get_user(email)
-    if not user:
-        return 'inactive'
-    status = user[1]
-    trial_end = datetime.strptime(user[2], '%Y-%m-%d %H:%M:%S.%f') if user[2] else None
-    
-    if status == 'trialing' and trial_end and datetime.now() > trial_end:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute("UPDATE users SET subscription_status='inactive' WHERE email=?", (email,))
-        conn.commit()
-        conn.close()
-        return 'inactive'
-    
-    return status
-
-def get_trial_days_left(email):
-    user = get_user(email)
-    if not user:
-        return 0
-    trial_end = datetime.strptime(user[2], '%Y-%m-%d %H:%M:%S.%f') if user[2] else None
-    if trial_end:
-        remaining = (trial_end - datetime.now()).days
-        return max(0, remaining)
-    return 0
-
-def save_login_token(email):
-    """Generate and save a login token for magic link."""
-    token = generate_login_token()
-    expiry = datetime.now() + timedelta(hours=24)  # Token valid for 24 hours
-    
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("UPDATE users SET login_token=?, token_expiry=? WHERE email=?", (token, expiry, email))
-    conn.commit()
-    conn.close()
-    return token
-
-def verify_login_token(token):
-    """Check if a login token is valid and return the email."""
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("SELECT email, token_expiry FROM users WHERE login_token=?", (token,))
-    result = c.fetchone()
-    conn.close()
-    
-    if result:
-        email, expiry = result
-        expiry = datetime.strptime(expiry, '%Y-%m-%d %H:%M:%S.%f') if expiry else None
-        if expiry and datetime.now() < expiry:
-            return email
-    return None
-
-def send_login_email(email, token):
-    """Send a magic login link via email."""
-    magic_link = f"{APP_URL}/?login_token={token}"
-    
-    subject = f"🔐 Login to {APP_NAME}"
-    body = f"""
-    <html>
-    <body>
-        <h2>Hello!</h2>
-        <p>Click the link below to log in to <strong>{APP_NAME}</strong>:</p>
-        <p><a href="{magic_link}">{magic_link}</a></p>
-        <p>This link will expire in 24 hours.</p>
-        <hr>
-        <p>If you didn't request this, please ignore this email.</p>
-    </body>
-    </html>
     """
-    
-    try:
-        msg = MIMEMultipart('alternative')
-        msg['From'] = EMAIL_SENDER
-        msg['To'] = email
-        msg['Subject'] = subject
-        
-        part = MIMEText(body, 'html')
-        msg.attach(part)
-        
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, email, msg.as_string())
-        server.quit()
-        return True
-    except Exception as e:
-        print(f"Email error: {e}")
+    Verify a password against its bcrypt hash.
+    """
+
+    if bcrypt is None:
         return False
 
-# ------------------------------------------------------------
-# 3. STRIPE PAYMENT FUNCTIONS
-# ------------------------------------------------------------
-def create_checkout_session(email):
     try:
-        checkout_session = stripe.checkout.Session.create(
-            payment_method_types=['card'],
-            line_items=[{
-                'price': MONTHLY_PRICE_ID,
-                'quantity': 1,
-            }],
-            mode='subscription',
-            success_url=APP_URL + '/?success=true',
-            cancel_url=APP_URL + '/?canceled=true',
-            customer_email=email,
+        return bcrypt.checkpw(
+            password.encode("utf-8"),
+            hashed.encode("utf-8")
         )
-        return checkout_session.url
-    except Exception as e:
-        st.error(f"Stripe error: {e}")
+    except Exception:
+        return False
+
+
+# ============================================================
+# 7. DATE HELPERS
+# ============================================================
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def datetime_to_string(dt):
+    return dt.isoformat()
+
+
+def string_to_datetime(value):
+    """
+    Safely convert stored datetime text back to datetime.
+    """
+
+    if not value:
         return None
 
-def create_portal_session(email):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("SELECT stripe_customer_id FROM users WHERE email=?", (email,))
-    result = c.fetchone()
-    conn.close()
-    if result and result[0]:
-        try:
-            session = stripe.billing_portal.Session.create(
-                customer=result[0],
-                return_url=APP_URL + '/'
+    try:
+        dt = datetime.fromisoformat(value)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# 8. USER ACCOUNT FUNCTIONS
+# ============================================================
+
+def valid_email(email):
+    pattern = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+    return bool(re.match(pattern, email.strip()))
+
+
+def signup_user(email, password):
+    email = email.strip().lower()
+
+    if not valid_email(email):
+        return False, "Please enter a valid email address."
+
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters."
+
+    try:
+        hashed = hash_password(password)
+    except Exception as exc:
+        return False, str(exc)
+
+    created_at = utc_now()
+    trial_end = created_at + timedelta(days=TRIAL_DAYS)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+
+        cursor.execute(
+            """
+            INSERT INTO users
+            (
+                email,
+                password,
+                subscription_status,
+                created_at,
+                trial_end_date
             )
-            return session.url
-        except:
-            return None
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                email,
+                hashed,
+                "trialing",
+                datetime_to_string(created_at),
+                datetime_to_string(trial_end),
+            ),
+        )
+
+        conn.commit()
+
+        return (
+            True,
+            f"Account created! Your {TRIAL_DAYS}-day free trial starts now."
+        )
+
+    except sqlite3.IntegrityError:
+
+        return False, "An account with this email already exists."
+
+    finally:
+
+        conn.close()
+
+
+def get_user(email):
+
+    email = email.strip().lower()
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            email,
+            password,
+            subscription_status,
+            trial_end_date,
+            stripe_customer_id
+        FROM users
+        WHERE email = ?
+        """,
+        (email,),
+    )
+
+    result = cursor.fetchone()
+
+    conn.close()
+
+    return result
+
+
+def set_user_status(email, status):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE users
+        SET subscription_status = ?
+        WHERE email = ?
+        """,
+        (status, email),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def login_user(email, password):
+
+    email = email.strip().lower()
+
+    user = get_user(email)
+
+    if not user:
+        return False, None
+
+    stored_hash = user["password"]
+
+    if not stored_hash:
+        return False, None
+
+    if not verify_password(password, stored_hash):
+        return False, None
+
+    status = get_user_status(email)
+
+    return True, status
+
+
+def get_user_status(email):
+
+    user = get_user(email)
+
+    if not user:
+        return "inactive"
+
+    status = user["subscription_status"]
+
+    trial_end = string_to_datetime(
+        user["trial_end_date"]
+    )
+
+    if (
+        status == "trialing"
+        and trial_end is not None
+        and utc_now() > trial_end
+    ):
+
+        set_user_status(email, "inactive")
+
+        return "inactive"
+
+    return status
+
+
+def get_trial_days_left(email):
+
+    user = get_user(email)
+
+    if not user:
+        return 0
+
+    trial_end = string_to_datetime(
+        user["trial_end_date"]
+    )
+
+    if not trial_end:
+        return 0
+
+    remaining_seconds = (
+        trial_end - utc_now()
+    ).total_seconds()
+
+    if remaining_seconds <= 0:
+        return 0
+
+    return int(np.ceil(remaining_seconds / 86400))
+
+
+# ============================================================
+# 9. MAGIC LOGIN
+# ============================================================
+
+def generate_login_token():
+
+    return secrets.token_urlsafe(32)
+
+
+def save_login_token(email):
+
+    token = generate_login_token()
+
+    expiry = utc_now() + timedelta(
+        hours=MAGIC_LINK_HOURS
+    )
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE users
+        SET login_token = ?,
+            token_expiry = ?
+        WHERE email = ?
+        """,
+        (
+            token,
+            datetime_to_string(expiry),
+            email,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+    return token
+
+
+def verify_login_token(token):
+
+    if not token:
+        return None
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT email, token_expiry
+        FROM users
+        WHERE login_token = ?
+        """,
+        (token,),
+    )
+
+    result = cursor.fetchone()
+
+    if not result:
+        conn.close()
+        return None
+
+    email = result["email"]
+
+    expiry = string_to_datetime(
+        result["token_expiry"]
+    )
+
+    if expiry and utc_now() < expiry:
+
+        # IMPORTANT:
+        # Make the magic link single-use.
+        cursor.execute(
+            """
+            UPDATE users
+            SET login_token = NULL,
+                token_expiry = NULL
+            WHERE email = ?
+            """,
+            (email,),
+        )
+
+        conn.commit()
+        conn.close()
+
+        return email
+
+    conn.close()
+
     return None
 
-# ------------------------------------------------------------
-# 4. DATA SOURCES
-# ------------------------------------------------------------
-def generate_demo_data():
-    products = [
-        {"name": "Coffee Beans", "base_price": 12.50, "cost": 6.00, "lead_time": 5},
-        {"name": "Green Tea", "base_price": 8.00, "cost": 3.50, "lead_time": 4},
-        {"name": "Bottled Water", "base_price": 1.20, "cost": 0.60, "lead_time": 3},
-        {"name": "Protein Bars", "base_price": 4.50, "cost": 2.00, "lead_time": 6},
-        {"name": "Hand Sanitiser", "base_price": 5.00, "cost": 2.50, "lead_time": 7},
-    ]
-    data = []
-    for p in products:
-        stock = random.randint(20, 300)
-        prev_cost = p["cost"] * random.uniform(0.85, 1.10)
-        base_sales = random.randint(5, 40)
-        sales = [max(0, int(base_sales + np.random.normal(0, 5))) for _ in range(30)]
-        trend = random.uniform(-1.5, 1.5)
-        for i in range(30):
-            sales[i] = max(0, sales[i] + int(trend * i * 0.5))
-        daily_sales = ",".join(map(str, sales))
-        data.append({
-            "product_name": p["name"],
-            "current_stock": stock,
-            "selling_price": round(p["base_price"] * random.uniform(0.9, 1.1), 2),
-            "cost_per_unit": round(p["cost"] * random.uniform(0.95, 1.05), 2),
-            "previous_cost_per_unit": round(prev_cost, 2),
-            "supplier_lead_time_days": p["lead_time"],
-            "daily_sales": daily_sales
-        })
-    return pd.DataFrame(data)
 
-def fetch_shopify_data(store_name, access_token):
-    headers = {
-        "X-Shopify-Access-Token": access_token,
-        "Content-Type": "application/json"
-    }
-    base_url = f"https://{store_name}.myshopify.com/admin/api/2024-01"
-    
-    try:
-        prod_resp = requests.get(f"{base_url}/products.json?limit=50", headers=headers, timeout=10)
-        prod_resp.raise_for_status()
-        products = prod_resp.json()["products"]
-        
-        orders_resp = requests.get(
-            f"{base_url}/orders.json?status=any&created_at_min={(datetime.now() - timedelta(days=30)).isoformat()}",
-            headers=headers,
-            timeout=10
+def send_login_email(email, token):
+
+    if not EMAIL_SENDER or not EMAIL_PASSWORD:
+
+        return False, (
+            "Email settings are not configured. "
+            "Add EMAIL_SENDER and EMAIL_PASSWORD to Streamlit secrets."
         )
-        orders_resp.raise_for_status()
-        orders = orders_resp.json()["orders"]
-        
-        rows = []
-        for p in products:
-            variant = p["variants"][0] if p["variants"] else {}
-            sku = variant.get("sku", p["handle"])
-            
-            daily_sales = [0] * 30
-            for order in orders:
-                if order["financial_status"] in ["paid", "pending"]:
-                    for item in order["line_items"]:
-                        if item["sku"] == sku or item["product_id"] == p["id"]:
-                            qty = item["quantity"]
-                            day_index = min(29, (datetime.now() - datetime.fromisoformat(order["created_at"].replace("Z", "+00:00"))).days)
-                            if day_index < 30:
-                                daily_sales[day_index] += qty
-            
-            daily_sales = daily_sales[::-1]
-            
-            rows.append({
-                "product_name": p["title"],
-                "current_stock": variant.get("inventory_quantity", 0),
-                "selling_price": float(variant.get("price", 0)),
-                "cost_per_unit": float(variant.get("cost", 0) or 0),
-                "previous_cost_per_unit": float(variant.get("cost", 0) or 0),
-                "supplier_lead_time_days": 5,
-                "daily_sales": ",".join(map(str, daily_sales))
-            })
-        return pd.DataFrame(rows)
-    except Exception as e:
-        st.error(f"Shopify API error: {e}")
+
+    magic_link = (
+        f"{APP_URL}/?login_token={token}"
+    )
+
+    subject = f"🔐 Login to {APP_NAME}"
+
+    body = f"""
+<html>
+<body>
+
+<h2>Welcome to {APP_NAME}</h2>
+
+<p>
+You requested a secure login link.
+</p>
+
+<p>
+<a href="{magic_link}">
+<strong>Log in to {APP_NAME}</strong>
+</a>
+</p>
+
+<p>
+This link expires in {MAGIC_LINK_HOURS} hours and can only be used once.
+</p>
+
+<hr>
+
+<p>
+If you did not request this login link, you can safely ignore this email.
+</p>
+
+</body>
+</html>
+"""
+
+    try:
+
+        message = MIMEMultipart("alternative")
+
+        message["From"] = EMAIL_SENDER
+        message["To"] = email
+        message["Subject"] = subject
+
+        message.attach(
+            MIMEText(body, "html")
+        )
+
+        server = smtplib.SMTP(
+            "smtp.gmail.com",
+            587,
+            timeout=20,
+        )
+
+        server.starttls()
+
+        server.login(
+            EMAIL_SENDER,
+            EMAIL_PASSWORD,
+        )
+
+        server.sendmail(
+            EMAIL_SENDER,
+            email,
+            message.as_string(),
+        )
+
+        server.quit()
+
+        return True, "Login link sent."
+
+    except Exception as exc:
+
+        return False, f"Email error: {exc}"
+
+
+# ============================================================
+# 10. STRIPE
+# ============================================================
+
+def stripe_is_configured():
+
+    return bool(
+        stripe
+        and STRIPE_SECRET_KEY
+        and MONTHLY_PRICE_ID
+    )
+
+
+def create_checkout_session(email):
+
+    if not stripe_is_configured():
+
+        st.error(
+            "Stripe is not configured yet. "
+            "Add STRIPE_SECRET_KEY and MONTHLY_PRICE_ID "
+            "to Streamlit secrets."
+        )
+
         return None
 
-# ------------------------------------------------------------
-# 5. INVENTORY AI ENGINE
-# ------------------------------------------------------------
-def process_data(df):
-    df = df.copy()
-    df['sales_history'] = df['daily_sales'].apply(lambda x: [int(v) for v in x.split(',')] if isinstance(x, str) else [0])
-    df['avg_daily_demand'] = df['sales_history'].apply(lambda h: np.mean(h[-7:]) if len(h)>=7 else np.mean(h) if len(h)>0 else 0)
-    def calc_trend(h):
-        if len(h)<3: return 0.0
-        return np.polyfit(np.arange(len(h)), h, 1)[0]
-    df['demand_trend'] = df['sales_history'].apply(calc_trend)
-    df['days_of_stock'] = df.apply(lambda r: r['current_stock']/r['avg_daily_demand'] if r['avg_daily_demand']>0 else 999, axis=1)
-    df['reorder_point'] = df.apply(lambda r: r['avg_daily_demand']*(r['supplier_lead_time_days']+2), axis=1)
-    df['stock_value'] = df['current_stock']*df['cost_per_unit']
-    df['profit_margin'] = (df['selling_price']-df['cost_per_unit'])/df['selling_price']*100
-    df['is_dead'] = df['sales_history'].apply(lambda h: all(v==0 for v in h[-10:]) if len(h)>=10 else False)
-    if 'previous_cost_per_unit' in df.columns:
-        df['price_hike_pct'] = (df['cost_per_unit']-df['previous_cost_per_unit'])/df['previous_cost_per_unit']*100
-        df['price_hike'] = df['price_hike_pct'] > 3
-    else:
-        df['price_hike'] = False
-        df['price_hike_pct'] = 0
-    return df
+    try:
 
-def generate_alerts(df):
-    alerts = []
-    for _, row in df.iterrows():
-        if row['current_stock'] < row['reorder_point']:
-            alerts.append({"priority":"🔴 HIGH","title":f"{row['product_name']} - Low Stock","desc":f"{row['days_of_stock']:.1f} days left.","impact":f"Order {int(row['reorder_point']*1.5)-row['current_stock']} units"})
-        if row['days_of_stock'] > 90 and row['avg_daily_demand']>0:
-            alerts.append({"priority":"🟡 MEDIUM","title":f"{row['product_name']} - Overstocked","desc":f"{row['days_of_stock']:.0f} days of stock.","impact":f"R{row['stock_value']:.2f} tied up"})
-        if row['demand_trend'] < -0.5:
-            alerts.append({"priority":"🟡 MEDIUM","title":f"{row['product_name']} - Demand Declining","desc":f"Trend: {row['demand_trend']:.2f} units/day.","impact":"Future revenue at risk"})
-        if row['price_hike']:
-            alerts.append({"priority":"🔴 HIGH","title":f"{row['product_name']} - Price Hike!","desc":f"Cost increased {row['price_hike_pct']:.1f}%","impact":f"R{row['cost_per_unit']*row['avg_daily_demand']*365*(row['price_hike_pct']/100):.2f} extra cost/year"})
-    dead_total = df[df['is_dead']]['stock_value'].sum()
-    if dead_total>0:
-        alerts.append({"priority":"🔴 HIGH","title":"Dead Stock Detected","desc":f"R{dead_total:.2f} tied up in non-moving items.","impact":"Wasted capital"})
-    return alerts
+        session = stripe.checkout.Session.create(
 
-# ------------------------------------------------------------
-# 6. AUTH UI
-# ------------------------------------------------------------
-def auth_page():
-    st.subheader(f"🔐 Welcome to {APP_NAME}")
-    st.markdown("**Start your 30-day free trial today.** No credit card required.")
-    
-    choice = st.radio("", ["Login", "Sign Up"])
-    email = st.text_input("Email")
-    password = st.text_input("Password", type="password")
-    
-    if choice == "Sign Up":
-        if st.button("🚀 Start Free Trial"):
-            if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-                st.error("Invalid email")
-            elif len(password) < 6:
-                st.error("Password must be at least 6 characters")
-            else:
-                ok, msg = signup_user(email, password)
-                if ok:
-                    st.success(msg)
-                    st.info("✅ Account created! Please log in.")
-                else:
-                    st.error(msg)
-    else:
-        if st.button("Log In"):
-            ok, status = login_user(email, password)
-            if ok:
-                st.session_state['logged_in'] = True
-                st.session_state['user_email'] = email
-                st.session_state['user_status'] = status
-                st.rerun()
-            else:
-                st.error("Invalid credentials")
-        
-        # --- NEW: Send Login Link Email ---
-        st.markdown("---")
-        st.caption("Or get a magic login link emailed to you")
-        if st.button("📧 Send Login Link to Email"):
-            if re.match(r"[^@]+@[^@]+\.[^@]+", email):
-                token = save_login_token(email)
-                if send_login_email(email, token):
-                    st.success(f"✅ Login link sent to {email}! Check your inbox.")
-                else:
-                    st.error("❌ Failed to send email. Please check your email settings.")
-            else:
-                st.error("Please enter a valid email address first.")
+            mode="subscription",
 
-# ------------------------------------------------------------
-# 7. MAIN DASHBOARD
-# ------------------------------------------------------------
-def main_dashboard():
-    st.title(f"🧠 {APP_NAME}")
-    st.caption("AI-powered inventory & money leak detection.")
+            line_items=[
+                {
+                    "price": MONTHLY_PRICE_ID,
+                    "quantity": 1,
+                }
+            ],
 
-    email = st.session_state['user_email']
-    status = get_user_status(email)
-    trial_days = get_trial_days_left(email)
-    
-    # --- SIDEBAR: DATA SOURCE SWITCHER ---
-    with st.sidebar:
-        st.header("🔌 Data Source")
-        
-        source = st.radio(
-            "Choose your data source:",
-            ["📊 Demo Store (Mock Data)", "🛒 Shopify (Live)", "📂 Upload CSV"]
+            customer_email=email,
+
+            success_url=(
+                APP_URL
+                + "/?payment=success"
+            ),
+
+            cancel_url=(
+                APP_URL
+                + "/?payment=cancelled"
+            ),
         )
-        
-        df = None
-        source_label = "Demo"
-        
-        if source == "📊 Demo Store (Mock Data)":
-            df = generate_demo_data()
-            source_label = "Demo (Dynamic Mock)"
-            st.success("✅ Running on realistic demo data.")
-        
-        elif source == "🛒 Shopify (Live)":
-            st.subheader("Shopify Credentials")
-            store = st.text_input("Store Name (e.g., my-store)")
-            token = st.text_input("Access Token", type="password")
-            if st.button("Fetch Live Data"):
-                if store and token:
-                    with st.spinner("Connecting to Shopify..."):
-                        df = fetch_shopify_data(store, token)
-                        if df is not None and not df.empty:
-                            source_label = "Shopify Live"
-                            st.success("✅ Data loaded from Shopify!")
-                        else:
-                            st.error("No data fetched. Check credentials.")
-                else:
-                    st.warning("Enter store name and access token.")
-            if df is None:
-                df = generate_demo_data()
-                source_label = "Demo (Waiting for Shopify)"
-        
-        elif source == "📂 Upload CSV":
-            uploaded = st.file_uploader("Upload Inventory File", type=["csv", "xlsx"])
-            if uploaded:
-                # --- Read the file (CSV or Excel) ---
-                try:
-                    if uploaded.name.endswith('.csv'):
-                        df = pd.read_csv(uploaded)
-                    else:
-                        df = pd.read_excel(uploaded, engine='openpyxl')
-                    
-                    # --- SMART DETECTION: Is this monthly data? ---
-                    month_cols = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-                    existing_months = [col for col in month_cols if col in df.columns]
-                    
-                    if existing_months:
-                        st.info(f"📆 Detected monthly data for {', '.join(existing_months)}. Converting to daily sales automatically...")
-                        daily_series = []
-                        for idx, row in df.iterrows():
-                            daily_list = []
-                            for month in existing_months:
-                                daily_avg = max(1, int(row[month] / 30))
-                                daily_list.extend([daily_avg] * 30)
-                            df.at[idx, 'daily_sales'] = ','.join(map(str, daily_list))
-                        
-                        if 'selling_price' not in df.columns:
-                            df['selling_price'] = 15.0
-                        if 'cost_per_unit' not in df.columns:
-                            df['cost_per_unit'] = 7.0
-                        if 'previous_cost_per_unit' not in df.columns:
-                            df['previous_cost_per_unit'] = df['cost_per_unit']
-                        if 'supplier_lead_time_days' not in df.columns:
-                            if 'Delivery_Days' in df.columns:
-                                df['supplier_lead_time_days'] = df['Delivery_Days']
-                            else:
-                                df['supplier_lead_time_days'] = 5
-                        
-                        st.success("✅ Monthly data converted to daily sales!")
-                    else:
-                        st.success("✅ Daily sales data loaded successfully!")
-                    
-                    source_label = "CSV Upload"
-                except Exception as e:
-                    st.error(f"Error reading file: {e}. Make sure it's a valid CSV or Excel file.")
-                    df = generate_demo_data()
-                    source_label = "Demo (Error loading file)"
-            else:
-                df = generate_demo_data()
-                source_label = "Demo (Waiting for CSV)"
-        
-        if df is None or df.empty:
-            df = generate_demo_data()
-            source_label = "Demo (Fallback)"
-        
-        st.markdown("---")
-        st.caption("📊 Data source: " + source_label)
 
-    # --- Status Bar ---
-    col_status, col_button = st.columns([3, 1])
-    with col_status:
-        if status == 'active':
-            st.success(f"✅ Active Subscription | Logged in as {email}")
-        elif status == 'trialing':
-            st.warning(f"🔓 Free Trial: {trial_days} days remaining | Logged in as {email}")
-        else:
-            st.error(f"🚫 Subscription Inactive | Logged in as {email}")
-    with col_button:
-        if st.button("🚪 Logout"):
-            st.session_state['logged_in'] = False
-            st.rerun()
+        return session.url
 
-    # --- PAYWALL ---
-    if status == 'inactive':
-        st.divider()
-        st.error("❌ Your free trial has expired or you have no active subscription.")
-        st.markdown("Subscribe now to regain access to your AI business manager.")
-        
-        col_price, col_action = st.columns([1, 1])
-        with col_price:
-            st.markdown("**📦 Monthly Plan**  \nR499 / month  \n*Full access + priority support*")
-        with col_action:
-            if st.button("🔗 Subscribe Now (Stripe)"):
-                url = create_checkout_session(email)
-                if url:
-                    st.markdown(f"Redirecting... [Click here if not redirected]({url})")
-                    st.info(f"Click the link to subscribe: {url}")
-                else:
-                    st.error("Failed to create checkout session. Check your Stripe keys.")
-        st.stop()
+    except Exception as exc:
 
-    if status == 'trialing':
-        st.info(f"🎉 You are on a {trial_days}-day free trial. No charges yet. Subscribe anytime to keep access after {trial_days} days.")
-    
-    # --- Process Data ---
-    df_processed = process_data(df)
-    alerts = generate_alerts(df_processed)
+        st.error(
+            f"Stripe error: {exc}"
+        )
 
-    # --- Metrics ---
-    col1, col2, col3, col4 = st.columns(4)
-    with col1: st.metric("💰 Inventory Value", f"R{df_processed['stock_value'].sum():,.2f}")
-    with col2: st.metric("⚠️ Alerts", len(alerts), delta="Urgent" if len([a for a in alerts if 'HIGH' in a['priority']])>0 else None)
-    with col3: st.metric("🧊 Dead Stock", f"R{df_processed[df_processed['is_dead']]['stock_value'].sum():,.2f}")
-    with col4: st.metric("📈 Avg Margin", f"{df_processed['profit_margin'].mean():.1f}%")
+        return None
 
-    st.divider()
 
-    # --- Alerts ---
-    st.subheader("🚨 Alerts")
-    if alerts:
-        for alert in alerts[:5]:
-            if "🔴" in alert['priority']:
-                st.error(f"**{alert['priority']} – {alert['title']}**  \n{alert['desc']}  \n💸 {alert.get('impact','')}")
-            else:
-                st.warning(f"**{alert['priority']} – {alert['title']}**  \n{alert['desc']}  \n💸 {alert.get('impact','')}")
+def create_portal_session(email):
+
+    if not stripe_is_configured():
+        return None
+
+    user = get_user(email)
+
+    if not user:
+        return None
+
+    customer_id = user["stripe_customer_id"]
+
+    if not customer_id:
+        return None
+
+    try:
+
+        session = stripe.billing_portal.Session.create(
+
+            customer=customer_id,
+
+            return_url=APP_URL,
+        )
+
+        return session.url
+
+    except Exception:
+
+        return None
+
+
+def update_subscription(
+    email,
+    status,
+    customer_id=None
+):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if customer_id:
+
+        cursor.execute(
+            """
+            UPDATE users
+            SET subscription_status = ?,
+                stripe_customer_id = ?
+            WHERE email = ?
+            """,
+            (
+                status,
+                customer_id,
+                email,
+            ),
+        )
+
     else:
-        st.success("All clear!")
 
-    # --- Stock Chart ---
-    st.subheader("📊 Stock Overview")
-    fig, ax = plt.subplots(figsize=(10, 4))
-    products = df_processed['product_name']
-    x = np.arange(len(products))
-    ax.bar(x-0.2, df_processed['current_stock'], 0.4, label='Current Stock', color='skyblue')
-    ax.bar(x+0.2, df_processed['reorder_point'], 0.4, label='Reorder Point', color='salmon')
-    ax.set_xticks(x); ax.set_xticklabels(products, rotation=20)
-    ax.legend(); ax.grid(axis='y', linestyle='--', alpha=0.7)
-    st.pyplot(fig)
+        cursor.execute(
+            """
+            UPDATE users
+            SET subscription_status = ?
+            WHERE email = ?
+            """,
+            (
+                status,
+                email,
+            ),
+        )
 
-    # --- PITCH MODE ---
-    st.divider()
-    st.subheader("📊 Pitch Mode: Audit Your Orders (Compare AI vs Reality)")
-    st.caption("Upload your actual purchase orders. The AI will tell you exactly how much money you wasted on over-ordering or lost on under-ordering.")
-    
-    col_pitch1, col_pitch2 = st.columns(2)
-    
-    with col_pitch1:
-        sales_file = st.file_uploader("1. Upload Sales History (CSV)", type=["csv"], key="sales_audit")
-        st.caption("Columns: product_name, quantity_sold, date")
-        
-    with col_pitch2:
-        orders_file = st.file_uploader("2. Upload Purchase Orders (CSV)", type=["csv"], key="orders_audit")
-        st.caption("Columns: product_name, quantity_ordered, cost_per_unit, date")
-    
-    if sales_file and orders_file:
-        try:
-            sales_df = pd.read_csv(sales_file)
-            orders_df = pd.read_csv(orders_file)
-            
-            total_sold = sales_df.groupby('product_name')['quantity_sold'].sum().reset_index()
-            total_ordered = orders_df.groupby('product_name')['quantity_ordered'].sum().reset_index()
-            costs = orders_df.groupby('product_name')['cost_per_unit'].first().reset_index()
-            
-            comparison = pd.merge(total_sold, total_ordered, on='product_name', how='outer').fillna(0)
-            comparison = pd.merge(comparison, costs, on='product_name', how='left').fillna(0)
-            
-            comparison['ai_suggested_order'] = comparison['quantity_sold'] * 1.15
-            comparison['over_ordered'] = comparison['quantity_ordered'] - comparison['ai_suggested_order']
-            comparison['under_ordered'] = comparison['ai_suggested_order'] - comparison['quantity_ordered']
-            comparison['waste_units'] = comparison['over_ordered'].apply(lambda x: max(0, x))
-            comparison['lost_units'] = comparison['under_ordered'].apply(lambda x: max(0, x))
-            comparison['waste_cost'] = comparison['waste_units'] * comparison['cost_per_unit']
-            comparison['lost_revenue'] = comparison['lost_units'] * (comparison['cost_per_unit'] * 1.5)
-            
-            total_waste = comparison['waste_cost'].sum()
-            total_lost_sales = comparison['lost_revenue'].sum()
-            total_impact = total_waste + total_lost_sales
-            
-            st.success(f"✅ Audit Complete! AI found a total potential leak of **R{total_impact:,.2f}** in this period.")
-            
-            st.dataframe(
-                comparison[['product_name', 'quantity_sold', 'quantity_ordered', 'ai_suggested_order', 
-                            'waste_units', 'lost_units', 'waste_cost', 'lost_revenue']],
-                column_config={
-                    "product_name": "Product",
-                    "quantity_sold": "Actual Sales",
-                    "quantity_ordered": "You Bought",
-                    "ai_suggested_order": "AI Suggested",
-                    "waste_units": "Over-Ordered (Waste)",
-                    "lost_units": "Under-Ordered (Lost Sales)",
-                    "waste_cost": st.column_config.NumberColumn("Wasted Money", format="R%.2f"),
-                    "lost_revenue": st.column_config.NumberColumn("Lost Revenue", format="R%.2f"),
+    if status == "active":
+
+        cursor.execute(
+            """
+            UPDATE users
+            SET trial_end_date = NULL
+            WHERE email = ?
+            """,
+            (email,),
+        )
+
+    conn.commit()
+    conn.close()
+
+
+# ============================================================
+# 11. DEMO DATA
+# ============================================================
+
+def generate_demo_data():
+
+    rng = np.random.default_rng(42)
+
+    products = [
+
+        {
+            "name": "Coffee Beans",
+            "price": 12.50,
+            "cost": 6.00,
+            "lead_time": 5,
+        },
+
+        {
+            "name": "Green Tea",
+            "price": 8.00,
+            "cost": 3.50,
+            "lead_time": 4,
+        },
+
+        {
+            "name": "Bottled Water",
+            "price": 1.20,
+            "cost": 0.60,
+            "lead_time": 3,
+        },
+
+        {
+            "name": "Protein Bars",
+            "price": 4.50,
+            "cost": 2.00,
+            "lead_time": 6,
+        },
+
+        {
+            "name": "Hand Sanitiser",
+            "price": 5.00,
+            "cost": 2.50,
+            "lead_time": 7,
+        },
+    ]
+
+    rows = []
+
+    dates = pd.date_range(
+        end=pd.Timestamp.today().normalize(),
+        periods=60,
+        freq="D",
+    )
+
+    for product in products:
+
+        base_sales = rng.integers(
+            5,
+            35,
+        )
+
+        trend = rng.uniform(
+            -0.20,
+            0.35,
+        )
+
+        starting_stock = rng.integers(
+            50,
+            300,
+        )
+
+        current_stock = float(
+            starting_stock
+        )
+
+        previous_cost = (
+            product["cost"]
+            * rng.uniform(0.90, 1.05)
+        )
+
+        for i, date in enumerate(dates):
+
+            demand = (
+                base_sales
+                + trend * i
+                + rng.normal(
+                    0,
+                    max(base_sales * 0.15, 1),
+                )
+            )
+
+            sales = max(
+                0,
+                int(round(demand)),
+            )
+
+            current_stock = max(
+                0,
+                current_stock - sales,
+            )
+
+            # Replenishment events create a more realistic
+            # inventory history.
+            if current_stock < 20:
+
+                current_stock += rng.integers(
+                    50,
+                    150,
+                )
+
+            rows.append(
+                {
+                    "date": date,
+                    "product_name": product["name"],
+                    "current_stock": int(
+                        round(current_stock)
+                    ),
+                    "selling_price": round(
+                        product["price"],
+                        2,
+                    ),
+                    "cost_per_unit": round(
+                        product["cost"],
+                        2,
+                    ),
+                    "previous_cost_per_unit": round(
+                        previous_cost,
+                        2,
+                    ),
+                    "supplier_lead_time_days": product[
+                        "lead_time"
+                    ],
+                    "sales": sales,
                 }
             )
-            
-            biggest_leak = comparison.loc[comparison['waste_cost'].idxmax()] if comparison['waste_cost'].max() > 0 else None
-            if biggest_leak is not None and biggest_leak['waste_cost'] > 0:
-                st.error(f"🔴 **Biggest Waste:** {biggest_leak['product_name']} | You wasted R{biggest_leak['waste_cost']:.2f} by over-ordering {int(biggest_leak['waste_units'])} units.")
-            
-            st.markdown("---")
-            st.success("**Pitch Script:** *'This is exactly what my AI does automatically every day. It stops you from throwing away money on products you don't need and makes sure you never run out of what sells. I can set this up for you permanently for R499/month.'*")
-            
-        except Exception as e:
-            st.error(f"Error processing files: {e}. Make sure the CSV columns are named correctly.")
-    else:
-        st.info("Upload both files to see how much money you are currently leaking.")
 
-    # --- STRIPE SUBSCRIPTION ---
-    st.divider()
-    st.subheader("💳 Upgrade to Paid Plan")
-    
-    if status == 'active':
-        st.success("✅ You are subscribed! Thank you for supporting Pro Manager.")
-        if st.button("Manage Subscription (Cancel/Update)"):
-            url = create_portal_session(email)
-            if url:
-                st.markdown(f"[Click here to manage your subscription]({url})")
-            else:
-                st.error("Could not load billing portal.")
-    else:
-        st.info("Your free trial is active. Upgrade now to support the platform and get priority support.")
-        col_price, col_action = st.columns([1, 1])
-        with col_price:
-            st.markdown("**📦 Monthly Plan**  \nR499 / month  \n*Full access + priority support*")
-        with col_action:
-            if st.button("🔗 Subscribe with Stripe"):
-                url = create_checkout_session(email)
-                if url:
-                    st.markdown(f"Redirecting to checkout... [Click here if not redirected]({url})")
-                    st.info(f"Click the link to subscribe: {url}")
-                else:
-                    st.error("Failed to create checkout session. Check your Stripe keys.")
+    return pd.DataFrame(rows)
 
-# ------------------------------------------------------------
-# 8. APP ROUTER
-# ------------------------------------------------------------
-def main():
-    init_db()
-    
-    # ---- Check for Magic Login Token in URL ----
-    query_params = st.query_params
-    if 'login_token' in query_params:
-        token = query_params['login_token']
-        email = verify_login_token(token)
-        if email:
-            st.session_state['logged_in'] = True
-            st.session_state['user_email'] = email
-            st.session_state['user_status'] = get_user_status(email)
-            st.query_params.clear()  # Remove token from URL
-            st.rerun()
+
+# ============================================================
+# 12. DATA CLEANING
+# ============================================================
+
+COLUMN_ALIASES = {
+
+    "product_name": [
+        "product_name",
+        "product",
+        "product name",
+        "item",
+        "item_name",
+        "sku",
+    ],
+
+    "current_stock": [
+        "current_stock",
+        "stock",
+        "inventory",
+        "inventory_level",
+        "on_hand",
+        "stock_level",
+    ],
+
+    "selling_price": [
+        "selling_price",
+        "selling price",
+        "sale_price",
+        "sale price",
+        "unit_price",
+        "price",
+    ],
+
+    "cost_per_unit": [
+        "cost_per_unit",
+        "cost per unit",
+        "unit_cost",
+        "unit cost",
+        "cost",
+        "purchase_price",
+    ],
+
+    "previous_cost_per_unit": [
+        "previous_cost_per_unit",
+        "previous cost per unit",
+        "previous_cost",
+        "old_cost",
+    ],
+
+    "supplier_lead_time_days": [
+        "supplier_lead_time_days",
+        "supplier lead time days",
+        "lead_time_days",
+        "lead_time",
+        "delivery_days",
+        "supplier_lead_time",
+    ],
+
+    "date": [
+        "date",
+        "order_date",
+        "transaction_date",
+        "sales_date",
+        "day",
+        "timestamp",
+    ],
+
+    "sales": [
+        "sales",
+        "quantity_sold",
+        "quantity sold",
+        "units_sold",
+        "units sold",
+        "qty",
+        "quantity",
+        "demand",
+    ],
+}
+
+
+def clean_column_name(column):
+
+    return (
+        str(column)
+        .strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+        .replace("/", "_")
+    )
+
+
+def normalize_columns(df):
+
+    if df is None or df.empty:
+
+        raise ValueError(
+            "The uploaded file is empty."
+        )
+
+    work = df.copy()
+
+    original_columns = list(work.columns)
+
+    cleaned_columns = [
+        clean_column_name(c)
+        for c in original_columns
+    ]
+
+    work.columns = cleaned_columns
+
+    rename_map = {}
+
+    for target, aliases in COLUMN_ALIASES.items():
+
+        aliases_cleaned = {
+            clean_column_name(a)
+            for a in aliases
+        }
+
+        for column in work.columns:
+
+            if column in aliases_cleaned:
+
+                if column not in rename_map:
+
+                    rename_map[column] = target
+
+                    break
+
+    work = work.rename(
+        columns=rename_map
+    )
+
+    required = [
+        "product_name",
+        "current_stock",
+        "sales",
+    ]
+
+    missing = [
+        column
+        for column in required
+        if column not in work.columns
+    ]
+
+    if missing:
+
+        raise ValueError(
+            "Missing required columns: "
+            + ", ".join(missing)
+            + ".\n\n"
+            "Required fields:\n"
+            "- product_name\n"
+            "- current_stock\n"
+            "- sales"
+        )
+
+    return work
+
+
+def prepare_data(df):
+
+    work = normalize_columns(df)
+
+    work["product_name"] = (
+        work["product_name"]
+        .astype(str)
+        .str.strip()
+    )
+
+    work = work[
+        work["product_name"].ne("")
+    ].copy()
+
+    numeric_columns = [
+        "current_stock",
+        "selling_price",
+        "cost_per_unit",
+        "previous_cost_per_unit",
+        "supplier_lead_time_days",
+        "sales",
+    ]
+
+    for column in numeric_columns:
+
+        if column in work.columns:
+
+            work[column] = pd.to_numeric(
+                work[column],
+                errors="coerce",
+            )
+
+    work["current_stock"] = (
+        work["current_stock"]
+        .fillna(0)
+        .clip(lower=0)
+    )
+
+    work["sales"] = (
+        work["sales"]
+        .fillna(0)
+        .clip(lower=0)
+    )
+
+    if "selling_price" not in work.columns:
+
+        work["selling_price"] = 0.0
+
+    work["selling_price"] = (
+        work["selling_price"]
+        .fillna(0)
+        .clip(lower=0)
+    )
+
+    if "cost_per_unit" not in work.columns:
+
+        work["cost_per_unit"] = 0.0
+
+    work["cost_per_unit"] = (
+        work["cost_per_unit"]
+        .fillna(0)
+        .clip(lower=0)
+    )
+
+    if "previous_cost_per_unit" not in work.columns:
+
+        work[
+            "previous_cost_per_unit"
+        ] = work["cost_per_unit"]
+
+    work[
+        "previous_cost_per_unit"
+    ] = (
+        work["previous_cost_per_unit"]
+        .fillna(
+            work["cost_per_unit"]
+        )
+        .clip(lower=0)
+    )
+
+    if (
+        "supplier_lead_time_days"
+        not in work.columns
+    ):
+
+        work[
+            "supplier_lead_time_days"
+        ] = 5
+
+    work[
+        "supplier_lead_time_days"
+    ] = (
+        pd.to_numeric(
+            work[
+                "supplier_lead_time_days"
+            ],
+            errors="coerce",
+        )
+        .fillna(5)
+        .clip(0, 365)
+    )
+
+    if "date" in work.columns:
+
+        work["date"] = pd.to_datetime(
+            work["date"],
+            errors="coerce",
+        )
+
+    else:
+
+        work["date"] = pd.NaT
+
+    return work.reset_index(
+        drop=True
+    )
+
+
+# ============================================================
+# 13. MONTHLY DATA SUPPORT
+# ============================================================
+
+MONTH_NAMES = [
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "may",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec",
+]
+
+
+def detect_monthly_columns(df):
+
+    cleaned = {
+        clean_column_name(c): c
+        for c in df.columns
+    }
+
+    found = []
+
+    for month in MONTH_NAMES:
+
+        if month in cleaned:
+
+            found.append(
+                cleaned[month]
+            )
+
+    return found
+
+
+def convert_monthly_data(df):
+
+    month_columns = detect_monthly_columns(
+        df
+    )
+
+    if not month_columns:
+
+        return df
+
+    work = df.copy()
+
+    daily_sales = []
+
+    for _, row in work.iterrows():
+
+        values = []
+
+        for month in month_columns:
+
+            try:
+
+                monthly_value = float(
+                    row[month]
+                )
+
+            except Exception:
+
+                monthly_value = 0
+
+            daily_average = max(
+                0,
+                monthly_value / 30,
+            )
+
+            values.extend(
+                [daily_average] * 30
+            )
+
+        daily_sales.append(
+            sum(values)
+        )
+
+    work["sales"] = daily_sales
+
+    return work
+
+
+# ============================================================
+# 14. DEMAND FORECASTING
+# ============================================================
+
+def calculate_forecast(
+    sales_history,
+    forecast_days=14,
+):
+
+    values = np.asarray(
+        sales_history,
+        dtype=float,
+    )
+
+    values = np.nan_to_num(
+        values,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+
+    values = np.clip(
+        values,
+        0,
+        None,
+    )
+
+    if len(values) == 0:
+
+        return 0.0
+
+    window = min(
+        len(values),
+        30,
+    )
+
+    recent = values[-window:]
+
+    recent_mean = float(
+        np.mean(recent)
+    )
+
+    if len(recent) < 3:
+
+        return recent_mean
+
+    x = np.arange(
+        len(recent),
+        dtype=float,
+    )
+
+    try:
+
+        slope, intercept = np.polyfit(
+            x,
+            recent,
+            1,
+        )
+
+        future_x = np.arange(
+            len(recent),
+            len(recent)
+            + max(forecast_days, 1),
+        )
+
+        predictions = (
+            intercept
+            + slope * future_x
+        )
+
+        predictions = np.clip(
+            predictions,
+            0,
+            None,
+        )
+
+        trend_forecast = float(
+            np.mean(predictions)
+        )
+
+        # Blend the trend with the recent
+        # average to avoid overreacting to
+        # one unusual period.
+        forecast = (
+            0.60 * trend_forecast
+            + 0.40 * recent_mean
+        )
+
+        return max(
+            0.0,
+            float(forecast),
+        )
+
+    except Exception:
+
+        return recent_mean
+
+
+# ============================================================
+# 15. INVENTORY ANALYSIS
+# ============================================================
+
+def process_data(df):
+
+    work = df.copy()
+
+    results = []
+
+    grouped = work.groupby(
+        "product_name",
+        sort=True,
+    )
+
+    for product, group in grouped:
+
+        group = group.copy()
+
+        group = group.sort_values(
+            "date"
+        )
+
+        sales_history = (
+            group["sales"]
+            .astype(float)
+            .tolist()
+        )
+
+        current_stock = float(
+            group["current_stock"].iloc[-1]
+        )
+
+        selling_price = float(
+            group["selling_price"].iloc[-1]
+        )
+
+        cost_per_unit = float(
+            group["cost_per_unit"].iloc[-1]
+        )
+
+        previous_cost = float(
+            group[
+                "previous_cost_per_unit"
+            ].iloc[-1]
+        )
+
+        lead_time = float(
+            group[
+                "supplier_lead_time_days"
+            ].iloc[-1]
+        )
+
+        avg_daily_demand = (
+            calculate_forecast(
+                sales_history,
+                14,
+            )
+        )
+
+        recent_sales = np.asarray(
+            sales_history[-30:],
+            dtype=float,
+        )
+
+        if len(recent_sales) > 1:
+
+            demand_std = float(
+                np.std(
+                    recent_sales,
+                    ddof=1,
+                )
+            )
+
         else:
-            st.error("❌ Invalid or expired login link. Please log in manually.")
-    
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
-    
-    if not st.session_state['logged_in']:
-        auth_page()
-        st.markdown("---")
-        st.caption("By continuing, you agree to our Terms of Service. 30-day free trial, cancel anytime.")
+
+            demand_std = 0.0
+
+        days_of_stock = (
+
+            current_stock
+            / avg_daily_demand
+
+            if avg_daily_demand > 0
+
+            else np.inf
+        )
+
+        # Safety buffer.
+        safety_stock = (
+            1.65
+            * demand_std
+            * np.sqrt(
+                max(lead_time, 1)
+            )
+        )
+
+        reorder_point = (
+            avg_daily_demand
+            * lead_time
+            + safety_stock
+        )
+
+        target_stock = (
+            avg_daily_demand
+            * (
+                lead_time
+                + 14
+            )
+            + safety_stock
+        )
+
+        recommended_order = max(
+            0,
+            int(
+                np.ceil(
+                    target_stock
+                    - current_stock
+                )
+            ),
+        )
+
+        stock_value = (
+            current_stock
+            * cost_per_unit
+        )
+
+        if selling_price > 0:
+
+            profit_margin = (
+                (
+                    selling_price
+                    - cost_per_unit
+                )
+                / selling_price
+                * 100
+            )
+
+        else:
+
+            profit_margin = 0.0
+
+        if previous_cost > 0:
+
+            price_hike_pct = (
+                (
+                    cost_per_unit
+                    - previous_cost
+                )
+                / previous_cost
+                * 100
+            )
+
+        else:
+
+            price_hike_pct = 0.0
+
+        recent_10 = sales_history[-10:]
+
+        is_dead = (
+            len(recent_10) >= 10
+            and all(
+                value == 0
+                for value in recent_10
+            )
+        )
+
+        if len(sales_history) >= 3:
+
+            x = np.arange(
+                len(sales_history)
+            )
+
+            try:
+
+                demand_trend = float(
+                    np.polyfit(
+                        x,
+                        sales_history,
+                        1,
+                    )[0]
+                )
+
+            except Exception:
+
+                demand_trend = 0.0
+
+        else:
+
+            demand_trend = 0.0
+
+        if current_stock <= reorder_point:
+
+            priority = "HIGH"
+
+            reason = (
+                "Stock is at or below "
+                "the estimated reorder point."
+            )
+
+        elif (
+            np.isfinite(days_of_stock)
+            and days_of_stock <= lead_time
+        ):
+
+            priority = "HIGH"
+
+            reason = (
+                "Current stock may not "
+                "cover supplier lead time."
+            )
+
+        elif (
+            np.isfinite(days_of_stock)
+            and days_of_stock
+            <= lead_time + 3
+        ):
+
+            priority = "MEDIUM"
+
+            reason = (
+                "Inventory cover is "
+                "getting low."
+            )
+
+        elif (
+            np.isfinite(days_of_stock)
+            and days_of_stock > 90
+        ):
+
+            priority = "MEDIUM"
+
+            reason = (
+                "Large amount of inventory "
+                "may be tied up."
+            )
+
+        else:
+
+            priority = "LOW"
+
+            reason = (
+                "No immediate inventory "
+                "risk detected."
+            )
+
+        results.append(
+            {
+                "product_name": product,
+                "current_stock": current_stock,
+                "avg_daily_demand": avg_daily_demand,
+                "demand_trend": demand_trend,
+                "days_of_stock": days_of_stock,
+                "supplier_lead_time_days": lead_time,
+                "reorder_point": reorder_point,
+                "recommended_order": recommended_order,
+                "stock_value": stock_value,
+                "selling_price": selling_price,
+                "cost_per_unit": cost_per_unit,
+                "previous_cost_per_unit": previous_cost,
+                "profit_margin": profit_margin,
+                "price_hike_pct": price_hike_pct,
+                "price_hike": price_hike_pct > 3,
+                "is_dead": is_dead,
+                "priority": priority,
+                "reason": reason,
+            }
+        )
+
+    return pd.DataFrame(
+        results
+    )
+
+
+# ============================================================
+# 16. ALERT GENERATION
+# ============================================================
+
+def generate_alerts(df):
+
+    alerts = []
+
+    for _, row in df.iterrows():
+
+        product = row["product_name"]
+
+        if row["current_stock"] <= row[
+            "reorder_point"
+        ]:
+
+            alerts.append(
+                {
+                    "priority": "🔴 HIGH",
+                    "title": (
+                        f"{product} - Low Stock"
+                    ),
+                    "description": (
+                        f"Approximately "
+                        f"{row['days_of_stock']:.1f} "
+                        "days of stock remain."
+                    ),
+                    "impact": (
+                        f"Recommended order: "
+                        f"{int(row['recommended_order'])} units."
+                    ),
+                }
+            )
+
+        if (
+            row["days_of_stock"]
+            != np.inf
+            and row["days_of_stock"] > 90
+        ):
+
+            alerts.append(
+                {
+                    "priority": "🟡 MEDIUM",
+                    "title": (
+                        f"{product} - Overstocked"
+                    ),
+                    "description": (
+                        f"Approximately "
+                        f"{row['days_of_stock']:.0f} "
+                        "days of stock."
+                    ),
+                    "impact": (
+                        f"R{row['stock_value']:,.2f} "
+                        "may be tied up."
+                    ),
+                }
+            )
+
+        if row["demand_trend"] < -0.5:
+
+            alerts.append(
+                {
+                    "priority": "🟡 MEDIUM",
+                    "title": (
+                        f"{product} - Demand Declining"
+                    ),
+                    "description": (
+                        f"Estimated trend: "
+                        f"{row['demand_trend']:.2f} "
+                        "units/day."
+                    ),
+                    "impact": (
+                        "Future revenue may be at risk."
+                    ),
+                }
+            )
+
+        if row["price_hike"]:
+
+            alerts.append(
+                {
+                    "priority": "🔴 HIGH",
+                    "title": (
+                        f"{product} - Supplier Cost Increase"
+                    ),
+                    "description": (
+                        f"Unit cost increased "
+                        f"{row['price_hike_pct']:.1f}%."
+                    ),
+                    "impact": (
+                        "Review supplier pricing "
+                        "and product margins."
+                    ),
+                }
+            )
+
+        if row["is_dead"]:
+
+            alerts.append(
+                {
+                    "priority": "🔴 HIGH",
+                    "title": (
+                        f"{product} - Dead Stock"
+                    ),
+                    "description": (
+                        "No sales detected in "
+                        "the recent history."
+                    ),
+                    "impact": (
+                        f"R{row['stock_value']:,.2f} "
+                        "may be tied up."
+                    ),
+                }
+            )
+
+    return alerts
+
+
+# ============================================================
+# 17. BUSINESS INSIGHTS
+# ============================================================
+
+def generate_business_insights(df):
+
+    insights = []
+
+    if df.empty:
+        return insights
+
+    total_stock_value = (
+        df["stock_value"].sum()
+    )
+
+    dead_stock_value = (
+        df.loc[
+            df["is_dead"],
+            "stock_value",
+        ].sum()
+    )
+
+    high_priority = (
+        df["priority"] == "HIGH"
+    ).sum()
+
+    price_hikes = (
+        df["price_hike"]
+    ).sum()
+
+    declining = (
+        df["demand_trend"] < -0.5
+    ).sum()
+
+    if high_priority > 0:
+
+        insights.append(
+            {
+                "type": "risk",
+                "title": "Immediate inventory risk",
+                "text": (
+                    f"{high_priority} product(s) "
+                    "need urgent inventory attention."
+                ),
+            }
+        )
+
+    if dead_stock_value > 0:
+
+        percentage = (
+            dead_stock_value
+            / total_stock_value
+            * 100
+            if total_stock_value > 0
+            else 0
+        )
+
+        insights.append(
+            {
+                "type": "money",
+                "title": "Capital tied up in dead stock",
+                "text": (
+                    f"Approximately "
+                    f"R{dead_stock_value:,.2f} "
+                    f"({percentage:.1f}% of inventory value) "
+                    "is associated with non-moving products."
+                ),
+            }
+        )
+
+    if price_hikes > 0:
+
+        insights.append(
+            {
+                "type": "supplier",
+                "title": "Supplier costs changed",
+                "text": (
+                    f"{price_hikes} product(s) "
+                    "show a supplier cost increase "
+                    "greater than 3%."
+                ),
+            }
+        )
+
+    if declining > 0:
+
+        insights.append(
+            {
+                "type": "sales",
+                "title": "Demand is declining",
+                "text": (
+                    f"{declining} product(s) "
+                    "show a negative demand trend."
+                ),
+            }
+        )
+
+    best_margin = df.loc[
+        df["profit_margin"].idxmax()
+    ]
+
+    insights.append(
+        {
+            "type": "opportunity",
+            "title": "Highest-margin product",
+            "text": (
+                f"{best_margin['product_name']} "
+                f"currently has the highest estimated "
+                f"gross margin at "
+                f"{best_margin['profit_margin']:.1f}%."
+            ),
+        }
+    )
+
+    return insights
+
+
+# ============================================================
+# 18. PITCH / ORDER AUDIT
+# ============================================================
+
+def run_order_audit(
+    sales_df,
+    orders_df,
+):
+
+    required_sales = {
+        "product_name",
+        "quantity_sold",
+        "date",
+    }
+
+    required_orders = {
+        "product_name",
+        "quantity_ordered",
+        "cost_per_unit",
+        "date",
+    }
+
+    missing_sales = (
+        required_sales
+        - set(sales_df.columns)
+    )
+
+    missing_orders = (
+        required_orders
+        - set(orders_df.columns)
+    )
+
+    if missing_sales:
+
+        raise ValueError(
+            "Sales file is missing: "
+            + ", ".join(missing_sales)
+        )
+
+    if missing_orders:
+
+        raise ValueError(
+            "Orders file is missing: "
+            + ", ".join(missing_orders)
+        )
+
+    sales_df = sales_df.copy()
+    orders_df = orders_df.copy()
+
+    sales_df[
+        "quantity_sold"
+    ] = pd.to_numeric(
+        sales_df[
+            "quantity_sold"
+        ],
+        errors="coerce",
+    ).fillna(0)
+
+    orders_df[
+        "quantity_ordered"
+    ] = pd.to_numeric(
+        orders_df[
+            "quantity_ordered"
+        ],
+        errors="coerce",
+    ).fillna(0)
+
+    orders_df[
+        "cost_per_unit"
+    ] = pd.to_numeric(
+        orders_df[
+            "cost_per_unit"
+        ],
+        errors="coerce",
+    ).fillna(0)
+
+    total_sold = (
+        sales_df
+        .groupby("product_name")[
+            "quantity_sold"
+        ]
+        .sum()
+        .reset_index()
+    )
+
+    total_ordered = (
+        orders_df
+        .groupby("product_name")[
+            "quantity_ordered"
+        ]
+        .sum()
+        .reset_index()
+    )
+
+    costs = (
+        orders_df
+        .groupby("product_name")[
+            "cost_per_unit"
+        ]
+        .mean()
+        .reset_index()
+    )
+
+    comparison = pd.merge(
+        total_sold,
+        total_ordered,
+        on="product_name",
+        how="outer",
+    )
+
+    comparison = pd.merge(
+        comparison,
+        costs,
+        on="product_name",
+        how="left",
+    )
+
+    comparison = comparison.fillna(0)
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # We no longer call "sales × 1.15" AI.
+    #
+    # This audit uses a transparent planning buffer:
+    # historical sales + 15% buffer.
+    #
+    # Later we can replace this with the same forecasting
+    # engine used by the main product.
+    # --------------------------------------------------------
+
+    comparison[
+        "planning_quantity"
+    ] = (
+        comparison["quantity_sold"]
+        * 1.15
+    )
+
+    comparison[
+        "over_ordered"
+    ] = (
+        comparison[
+            "quantity_ordered"
+        ]
+        - comparison[
+            "planning_quantity"
+        ]
+    ).clip(lower=0)
+
+    comparison[
+        "under_ordered"
+    ] = (
+        comparison[
+            "planning_quantity"
+        ]
+        - comparison[
+            "quantity_ordered"
+        ]
+    ).clip(lower=0)
+
+    comparison[
+        "waste_cost"
+    ] = (
+        comparison["over_ordered"]
+        * comparison["cost_per_unit"]
+    )
+
+    comparison[
+        "estimated_lost_sales_value"
+    ] = (
+        comparison["under_ordered"]
+        * comparison["cost_per_unit"]
+    )
+
+    return comparison
+
+
+# ============================================================
+# 19. AUTHENTICATION PAGE
+# ============================================================
+
+def auth_page():
+
+    st.title(
+        f"🧠 {APP_NAME}"
+    )
+
+    st.caption(
+        "AI-powered business intelligence."
+    )
+
+    st.markdown(
+        """
+        ### Turn your business data into decisions.
+
+        Pro Manager helps identify:
+
+        - 📦 Inventory risks
+        - 💰 Money leaks
+        - 📈 Demand changes
+        - 🧊 Dead stock
+        - 🏭 Supplier cost increases
+        - 🚨 Business problems that need attention
+        """
+    )
+
+    st.divider()
+
+    choice = st.radio(
+        "Account",
+        [
+            "Login",
+            "Sign Up",
+        ],
+        horizontal=True,
+    )
+
+    email = st.text_input(
+        "Email address",
+        placeholder="you@example.com",
+    )
+
+    password = st.text_input(
+        "Password",
+        type="password",
+    )
+
+    if choice == "Sign Up":
+
+        if st.button(
+            "🚀 Start 30-Day Free Trial",
+            use_container_width=True,
+        ):
+
+            if not valid_email(email):
+
+                st.error(
+                    "Please enter a valid email."
+                )
+
+            elif len(password) < 8:
+
+                st.error(
+                    "Password must be at least 8 characters."
+                )
+
+            else:
+
+                success, message = signup_user(
+                    email,
+                    password,
+                )
+
+                if success:
+
+                    st.success(message)
+
+                    st.info(
+                        "Your account has been created. "
+                        "You can now log in."
+                    )
+
+                else:
+
+                    st.error(message)
+
     else:
+
+        if st.button(
+            "🔐 Log In",
+            use_container_width=True,
+        ):
+
+            success, status = login_user(
+                email,
+                password,
+            )
+
+            if success:
+
+                st.session_state[
+                    "logged_in"
+                ] = True
+
+                st.session_state[
+                    "user_email"
+                ] = email.strip().lower()
+
+                st.session_state[
+                    "user_status"
+                ] = status
+
+                st.rerun()
+
+            else:
+
+                st.error(
+                    "Invalid email or password."
+                )
+
+        st.divider()
+
+        st.caption(
+            "Forgot your password? "
+            "Use a secure login link instead."
+        )
+
+        if st.button(
+            "📧 Email Me a Login Link",
+            use_container_width=True,
+        ):
+
+            clean_email = (
+                email.strip().lower()
+            )
+
+            if not valid_email(clean_email):
+
+                st.error(
+                    "Please enter a valid email address."
+                )
+
+            else:
+
+                user = get_user(
+                    clean_email
+                )
+
+                if not user:
+
+                    # Do not reveal too much account
+                    # information in production.
+                    st.info(
+                        "If an account exists for that "
+                        "email, a login link will be sent."
+                    )
+
+                else:
+
+                    token = save_login_token(
+                        clean_email
+                    )
+
+                    success, message = (
+                        send_login_email(
+                            clean_email,
+                            token,
+                        )
+                    )
+
+                    if success:
+
+                        st.success(
+                            "Login link sent. "
+                            "Check your inbox."
+                        )
+
+                    else:
+
+                        st.error(message)
+
+    st.divider()
+
+    st.caption(
+        "30-day free trial. "
+        "No credit card required."
+    )
+
+
+# ============================================================
+# 20. DATA SOURCE LOADER
+# ============================================================
+
+def load_uploaded_file(uploaded_file):
+
+    if uploaded_file is None:
+        return None
+
+    filename = (
+        uploaded_file.name.lower()
+    )
+
+    if filename.endswith(".csv"):
+
+        return pd.read_csv(
+            uploaded_file
+        )
+
+    if (
+        filename.endswith(".xlsx")
+        or filename.endswith(".xls")
+    ):
+
+        return pd.read_excel(
+            uploaded_file,
+            engine="openpyxl",
+        )
+
+    raise ValueError(
+        "Unsupported file type."
+    )
+
+
+# ============================================================
+# 21. SIDEBAR DATA SOURCE
+# ============================================================
+
+def data_source_sidebar():
+
+    with st.sidebar:
+
+        st.header(
+            "🔌 Data Source"
+        )
+
+        source = st.radio(
+            "Choose your data source:",
+            [
+                "📊 Demo Business",
+                "📂 Upload CSV / Excel",
+            ],
+        )
+
+        st.divider()
+
+        if source == "📊 Demo Business":
+
+            st.success(
+                "Demo data is active."
+            )
+
+            return (
+                generate_demo_data(),
+                "Demo Business",
+            )
+
+        uploaded = st.file_uploader(
+            "Upload your business data",
+            type=[
+                "csv",
+                "xlsx",
+                "xls",
+            ],
+        )
+
+        if uploaded is None:
+
+            st.info(
+                "Upload a CSV or Excel file "
+                "to analyse your business."
+            )
+
+            return (
+                generate_demo_data(),
+                "Demo Business - Waiting for Upload",
+            )
+
+        try:
+
+            raw = load_uploaded_file(
+                uploaded
+            )
+
+            monthly_columns = (
+                detect_monthly_columns(
+                    raw
+                )
+            )
+
+            if monthly_columns:
+
+                st.info(
+                    "Monthly sales columns detected. "
+                    "They will be converted into a "
+                    "sales estimate for analysis."
+                )
+
+                raw = convert_monthly_data(
+                    raw
+                )
+
+            cleaned = prepare_data(
+                raw
+            )
+
+            st.success(
+                f"Loaded {uploaded.name}"
+            )
+
+            return (
+                cleaned,
+                uploaded.name,
+            )
+
+        except Exception as exc:
+
+            st.error(
+                f"Could not process file: {exc}"
+            )
+
+            st.info(
+                "Using demo data so the dashboard "
+                "can continue running."
+            )
+
+            return (
+                generate_demo_data(),
+                "Demo Business - Upload Error",
+            )
+
+
+# ============================================================
+# 22. DASHBOARD
+# ============================================================
+
+def main_dashboard():
+
+    email = st.session_state[
+        "user_email"
+    ]
+
+    status = get_user_status(
+        email
+    )
+
+    trial_days = get_trial_days_left(
+        email
+    )
+
+    # --------------------------------------------------------
+    # Header
+    # --------------------------------------------------------
+
+    st.title(
+        f"🧠 {APP_NAME}"
+    )
+
+    st.caption(
+        "Your AI-powered business manager."
+    )
+
+    # --------------------------------------------------------
+    # Sidebar
+    # --------------------------------------------------------
+
+    df, source_label = (
+        data_source_sidebar()
+    )
+
+    with st.sidebar:
+
+        st.divider()
+
+        st.caption(
+            f"📊 Data source: {source_label}"
+        )
+
+    # --------------------------------------------------------
+    # Account status
+    # --------------------------------------------------------
+
+    col_status, col_logout = st.columns(
+        [4, 1]
+    )
+
+    with col_status:
+
+        if status == "active":
+
+            st.success(
+                f"✅ Active subscription · {email}"
+            )
+
+        elif status == "trialing":
+
+            st.warning(
+                f"🔓 Free trial · "
+                f"{trial_days} day(s) remaining · "
+                f"{email}"
+            )
+
+        else:
+
+            st.error(
+                f"🚫 Subscription inactive · {email}"
+            )
+
+    with col_logout:
+
+        if st.button(
+            "🚪 Logout"
+        ):
+
+            st.session_state[
+                "logged_in"
+            ] = False
+
+            st.session_state.pop(
+                "user_email",
+                None,
+            )
+
+            st.session_state.pop(
+                "user_status",
+                None,
+            )
+
+            st.rerun()
+
+    # --------------------------------------------------------
+    # Paywall
+    # --------------------------------------------------------
+
+    if status == "inactive":
+
+        st.divider()
+
+        st.error(
+            "Your free trial has expired "
+            "or your subscription is inactive."
+        )
+
+        st.markdown(
+            f"""
+            ### Continue using {APP_NAME}
+
+            **Monthly plan:** {MONTHLY_PRICE_DISPLAY}
+
+            ✓ Inventory intelligence  
+            ✓ Money leak detection  
+            ✓ Business insights  
+            ✓ Demand analysis  
+            ✓ Priority support
+            """
+        )
+
+        if st.button(
+            "💳 Subscribe with Stripe",
+            use_container_width=True,
+        ):
+
+            checkout_url = (
+                create_checkout_session(
+                    email
+                )
+            )
+
+            if checkout_url:
+
+                st.markdown(
+                    f"[Continue to secure Stripe checkout]({checkout_url})"
+                )
+
+        st.stop()
+
+    # --------------------------------------------------------
+    # Trial message
+    # --------------------------------------------------------
+
+    if status == "trialing":
+
+        st.info(
+            f"🎉 You're using your free trial. "
+            f"{trial_days} day(s) remaining."
+        )
+
+    # --------------------------------------------------------
+    # Process inventory
+    # --------------------------------------------------------
+
+    try:
+
+        processed = process_data(
+            df
+        )
+
+    except Exception as exc:
+
+        st.error(
+            f"Could not analyse the data: {exc}"
+        )
+
+        st.stop()
+
+    alerts = generate_alerts(
+        processed
+    )
+
+    insights = generate_business_insights(
+        processed
+    )
+
+    # ========================================================
+    # KEY METRICS
+    # ========================================================
+
+    st.divider()
+
+    total_inventory_value = (
+        processed["stock_value"].sum()
+    )
+
+    dead_stock_value = (
+        processed.loc[
+            processed["is_dead"],
+            "stock_value",
+        ].sum()
+    )
+
+    high_alerts = len(
+        [
+            alert
+            for alert in alerts
+            if "HIGH" in alert["priority"]
+        ]
+    )
+
+    avg_margin = (
+        processed["profit_margin"].mean()
+        if not processed.empty
+        else 0
+    )
+
+    col1, col2, col3, col4 = st.columns(
+        4
+    )
+
+    col1.metric(
+        "💰 Inventory Value",
+        f"R{total_inventory_value:,.2f}",
+    )
+
+    col2.metric(
+        "🚨 High-Priority Alerts",
+        high_alerts,
+    )
+
+    col3.metric(
+        "🧊 Dead Stock",
+        f"R{dead_stock_value:,.2f}",
+    )
+
+    col4.metric(
+        "📈 Average Margin",
+        f"{avg_margin:.1f}%",
+    )
+
+    # ========================================================
+    # TABS
+    # ========================================================
+
+    (
+        overview_tab,
+        alerts_tab,
+        inventory_tab,
+        forecast_tab,
+        pitch_tab,
+    ) = st.tabs(
+        [
+            "🧠 Business Overview",
+            "🚨 Alerts",
+            "📦 Inventory",
+            "📈 Forecast",
+            "💡 Pitch Mode",
+        ]
+    )
+
+    # ========================================================
+    # BUSINESS OVERVIEW
+    # ========================================================
+
+    with overview_tab:
+
+        st.subheader(
+            "🧠 What should you know today?"
+        )
+
+        if not insights:
+
+            st.success(
+                "No major business insights detected."
+            )
+
+        else:
+
+            for insight in insights:
+
+                if insight["type"] == "risk":
+
+                    st.error(
+                        f"🔴 **{insight['title']}**\n\n"
+                        f"{insight['text']}"
+                    )
+
+                elif insight["type"] == "money":
+
+                    st.warning(
+                        f"💰 **{insight['title']}**\n\n"
+                        f"{insight['text']}"
+                    )
+
+                elif insight["type"] == "supplier":
+
+                    st.warning(
+                        f"🏭 **{insight['title']}**\n\n"
+                        f"{insight['text']}"
+                    )
+
+                elif insight["type"] == "sales":
+
+                    st.warning(
+                        f"📉 **{insight['title']}**\n\n"
+                        f"{insight['text']}"
+                    )
+
+                else:
+
+                    st.success(
+                        f"🟢 **{insight['title']}**\n\n"
+                        f"{insight['text']}"
+                    )
+
+        st.divider()
+
+        st.subheader(
+            "🎯 Recommended actions"
+        )
+
+        high_priority_rows = processed[
+            processed["priority"] == "HIGH"
+        ]
+
+        if high_priority_rows.empty:
+
+            st.success(
+                "No urgent inventory action is required."
+            )
+
+        else:
+
+            for _, row in (
+                high_priority_rows
+                .head(5)
+                .iterrows()
+            ):
+
+                st.markdown(
+                    f"""
+                    **{row['product_name']}**
+
+                    Current stock: **{int(row['current_stock'])}**
+
+                    Estimated daily demand:
+                    **{row['avg_daily_demand']:.1f}**
+
+                    Recommended order:
+                    **{int(row['recommended_order'])} units**
+
+                    Reason: {row['reason']}
+                    """
+                )
+
+                st.divider()
+
+    # ========================================================
+    # ALERTS
+    # ========================================================
+
+    with alerts_tab:
+
+        st.subheader(
+            "🚨 Business Alerts"
+        )
+
+        if not alerts:
+
+            st.success(
+                "Everything looks healthy."
+            )
+
+        else:
+
+            for alert in alerts:
+
+                if "HIGH" in alert["priority"]:
+
+                    st.error(
+                        f"**{alert['priority']} · "
+                        f"{alert['title']}**\n\n"
+                        f"{alert['description']}\n\n"
+                        f"💸 {alert['impact']}"
+                    )
+
+                else:
+
+                    st.warning(
+                        f"**{alert['priority']} · "
+                        f"{alert['title']}**\n\n"
+                        f"{alert['description']}\n\n"
+                        f"💸 {alert['impact']}"
+                    )
+
+    # ========================================================
+    # INVENTORY
+    # ========================================================
+
+    with inventory_tab:
+
+        st.subheader(
+            "📦 Inventory Intelligence"
+        )
+
+        display_columns = [
+            "product_name",
+            "current_stock",
+            "avg_daily_demand",
+            "days_of_stock",
+            "reorder_point",
+            "recommended_order",
+            "stock_value",
+            "profit_margin",
+            "price_hike_pct",
+            "priority",
+        ]
+
+        display_df = (
+            processed[
+                display_columns
+            ]
+            .copy()
+        )
+
+        display_df = display_df.rename(
+            columns={
+                "product_name": "Product",
+                "current_stock": "Current Stock",
+                "avg_daily_demand": "Daily Demand",
+                "days_of_stock": "Days of Stock",
+                "reorder_point": "Reorder Point",
+                "recommended_order": "Recommended Order",
+                "stock_value": "Stock Value",
+                "profit_margin": "Profit Margin %",
+                "price_hike_pct": "Cost Change %",
+                "priority": "Priority",
+            }
+        )
+
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        csv_data = (
+            processed
+            .to_csv(index=False)
+            .encode("utf-8")
+        )
+
+        st.download_button(
+            "⬇️ Download Inventory Analysis",
+            data=csv_data,
+            file_name=(
+                "pro_manager_inventory_analysis.csv"
+            ),
+            mime="text/csv",
+        )
+
+        st.divider()
+
+        st.subheader(
+            "📊 Stock vs Reorder Point"
+        )
+
+        fig, ax = plt.subplots(
+            figsize=(12, 5)
+        )
+
+        x = np.arange(
+            len(processed)
+        )
+
+        width = 0.35
+
+        ax.bar(
+            x - width / 2,
+            processed[
+                "current_stock"
+            ],
+            width,
+            label="Current Stock",
+        )
+
+        ax.bar(
+            x + width / 2,
+            processed[
+                "reorder_point"
+            ],
+            width,
+            label="Reorder Point",
+        )
+
+        ax.set_xticks(x)
+
+        ax.set_xticklabels(
+            processed[
+                "product_name"
+            ],
+            rotation=25,
+            ha="right",
+        )
+
+        ax.set_ylabel(
+            "Units"
+        )
+
+        ax.set_title(
+            "Current Stock vs Estimated Reorder Point"
+        )
+
+        ax.legend()
+
+        ax.grid(
+            axis="y",
+            linestyle="--",
+            alpha=0.4,
+        )
+
+        st.pyplot(
+            fig,
+            clear_figure=True,
+        )
+
+    # ========================================================
+    # FORECAST
+    # ========================================================
+
+    with forecast_tab:
+
+        st.subheader(
+            "📈 Demand Forecast"
+        )
+
+        st.caption(
+            "The current MVP uses historical demand "
+            "and trend analysis. Later versions can "
+            "use more advanced forecasting models."
+        )
+
+        forecast_rows = []
+
+        for product, group in (
+            df.groupby("product_name")
+        ):
+
+            history = (
+                group
+                .sort_values("date")
+                ["sales"]
+                .tolist()
+            )
+
+            forecast = calculate_forecast(
+                history,
+                14,
+            )
+
+            forecast_rows.append(
+                {
+                    "Product": product,
+                    "Estimated Daily Demand": round(
+                        forecast,
+                        2,
+                    ),
+                    "Estimated 14-Day Demand": round(
+                        forecast * 14,
+                        0,
+                    ),
+                }
+            )
+
+        forecast_df = pd.DataFrame(
+            forecast_rows
+        )
+
+        st.dataframe(
+            forecast_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ========================================================
+    # PITCH MODE
+    # ========================================================
+
+    with pitch_tab:
+
+        st.subheader(
+            "💡 Pitch Mode"
+        )
+
+        st.markdown(
+            """
+            ### Show a business owner what Pro Manager could find.
+
+            Upload:
+
+            **1. Sales history**
+
+            **2. Purchase orders**
+
+            The system compares actual purchasing against a
+            transparent planning benchmark.
+            """
+        )
+
+        col_a, col_b = st.columns(
+            2
+        )
+
+        with col_a:
+
+            sales_file = st.file_uploader(
+                "1️⃣ Sales History",
+                type=["csv"],
+                key="sales_audit",
+            )
+
+            st.caption(
+                "Required columns: "
+                "product_name, quantity_sold, date"
+            )
+
+        with col_b:
+
+            orders_file = st.file_uploader(
+                "2️⃣ Purchase Orders",
+                type=["csv"],
+                key="orders_audit",
+            )
+
+            st.caption(
+                "Required columns: "
+                "product_name, quantity_ordered, "
+                "cost_per_unit, date"
+            )
+
+        if sales_file and orders_file:
+
+            try:
+
+                sales_df = pd.read_csv(
+                    sales_file
+                )
+
+                orders_df = pd.read_csv(
+                    orders_file
+                )
+
+                comparison = run_order_audit(
+                    sales_df,
+                    orders_df,
+                )
+
+                total_waste = (
+                    comparison[
+                        "waste_cost"
+                    ].sum()
+                )
+
+                estimated_lost_sales = (
+                    comparison[
+                        "estimated_lost_sales_value"
+                    ].sum()
+                )
+
+                total_impact = (
+                    total_waste
+                    + estimated_lost_sales
+                )
+
+                st.success(
+                    "✅ Audit completed."
+                )
+
+                col1, col2, col3 = st.columns(
+                    3
+                )
+
+                col1.metric(
+                    "Potential Excess Cost",
+                    f"R{total_waste:,.2f}",
+                )
+
+                col2.metric(
+                    "Estimated Missed Sales Value",
+                    f"R{estimated_lost_sales:,.2f}",
+                )
+
+                col3.metric(
+                    "Estimated Combined Impact",
+                    f"R{total_impact:,.2f}",
+                )
+
+                st.caption(
+                    "These figures are estimates based on "
+                    "the uploaded historical data and the "
+                    "transparent 15% planning buffer. "
+                    "They are not proof of actual financial loss."
+                )
+
+                audit_display = comparison[
+                    [
+                        "product_name",
+                        "quantity_sold",
+                        "quantity_ordered",
+                        "planning_quantity",
+                        "over_ordered",
+                        "under_ordered",
+                        "waste_cost",
+                        "estimated_lost_sales_value",
+                    ]
+                ]
+
+                st.dataframe(
+                    audit_display,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                if total_waste > 0:
+
+                    biggest = comparison.loc[
+                        comparison[
+                            "waste_cost"
+                        ].idxmax()
+                    ]
+
+                    if (
+                        biggest["waste_cost"]
+                        > 0
+                    ):
+
+                        st.error(
+                            f"🔴 Biggest potential "
+                            f"excess cost: "
+                            f"{biggest['product_name']} — "
+                            f"approximately "
+                            f"R{biggest['waste_cost']:,.2f}."
+                        )
+
+                st.divider()
+
+                st.subheader(
+                    "🎤 Example Pitch"
+                )
+
+                st.info(
+                    """
+                    “Pro Manager analyses your business data,
+                    identifies inventory risks and potential
+                    money leaks, and gives you specific actions
+                    instead of making you search through
+                    spreadsheets manually.”
+                    """
+                )
+
+            except Exception as exc:
+
+                st.error(
+                    f"Could not complete the audit: {exc}"
+                )
+
+        else:
+
+            st.info(
+                "Upload both files to run the audit."
+            )
+
+    # ========================================================
+    # BILLING
+    # ========================================================
+
+    st.divider()
+
+    st.subheader(
+        "💳 Subscription"
+    )
+
+    if status == "active":
+
+        st.success(
+            "✅ Your Pro Manager subscription is active."
+        )
+
+        portal_url = create_portal_session(
+            email
+        )
+
+        if portal_url:
+
+            st.markdown(
+                f"[Manage your subscription]({portal_url})"
+            )
+
+    else:
+
+        st.info(
+            f"Your free trial is active. "
+            f"Continue with the paid plan for "
+            f"{MONTHLY_PRICE_DISPLAY}."
+        )
+
+        if st.button(
+            "💳 Subscribe with Stripe",
+            use_container_width=True,
+        ):
+
+            checkout_url = (
+                create_checkout_session(
+                    email
+                )
+            )
+
+            if checkout_url:
+
+                st.markdown(
+                    f"[Continue to secure checkout]({checkout_url})"
+                )
+
+
+# ============================================================
+# 23. APP ROUTER
+# ============================================================
+
+def main():
+
+    init_db()
+
+    # --------------------------------------------------------
+    # Magic login token
+    # --------------------------------------------------------
+
+    query_params = st.query_params
+
+    login_token = query_params.get(
+        "login_token"
+    )
+
+    if login_token:
+
+        email = verify_login_token(
+            login_token
+        )
+
+        if email:
+
+            st.session_state[
+                "logged_in"
+            ] = True
+
+            st.session_state[
+                "user_email"
+            ] = email
+
+            st.session_state[
+                "user_status"
+            ] = get_user_status(
+                email
+            )
+
+            st.query_params.clear()
+
+            st.rerun()
+
+        else:
+
+            st.error(
+                "❌ Invalid or expired login link."
+            )
+
+    # --------------------------------------------------------
+    # Payment status
+    # --------------------------------------------------------
+
+    payment_status = (
+        query_params.get(
+            "payment"
+        )
+    )
+
+    if payment_status == "success":
+
+        st.success(
+            "Payment process completed. "
+            "Your subscription status will update "
+            "once Stripe confirms the subscription."
+        )
+
+    elif payment_status == "cancelled":
+
+        st.info(
+            "Payment was cancelled. "
+            "Your account has not been changed."
+        )
+
+    # --------------------------------------------------------
+    # Session state
+    # --------------------------------------------------------
+
+    if "logged_in" not in st.session_state:
+
+        st.session_state[
+            "logged_in"
+        ] = False
+
+    # --------------------------------------------------------
+    # Routing
+    # --------------------------------------------------------
+
+    if not st.session_state[
+        "logged_in"
+    ]:
+
+        auth_page()
+
+    else:
+
         main_dashboard()
 
+
+# ============================================================
+# 24. RUN APPLICATION
+# ============================================================
+
 if __name__ == "__main__":
+
     main()
