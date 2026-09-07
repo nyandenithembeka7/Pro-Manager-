@@ -969,6 +969,15 @@ COLUMN_ALIASES = {
         "quantity",
         "demand",
     ],
+
+    "daily_sales": [
+        "daily_sales",
+        "daily sales",
+        "sales_history",
+        "sales history",
+        "daily_demand",
+        "daily demand",
+    ],
 }
 
 
@@ -994,33 +1003,31 @@ def normalize_columns(df):
 
     work = df.copy()
 
-    original_columns = list(work.columns)
-
-    cleaned_columns = [
-        clean_column_name(c)
-        for c in original_columns
+    work.columns = [
+        clean_column_name(column)
+        for column in work.columns
     ]
-
-    work.columns = cleaned_columns
 
     rename_map = {}
 
     for target, aliases in COLUMN_ALIASES.items():
 
         aliases_cleaned = {
-            clean_column_name(a)
-            for a in aliases
+            clean_column_name(alias)
+            for alias in aliases
         }
 
         for column in work.columns:
 
             if column in aliases_cleaned:
 
-                if column not in rename_map:
+                if column != target:
 
-                    rename_map[column] = target
+                    if target not in work.columns:
 
-                    break
+                        rename_map[column] = target
+
+                break
 
     work = work.rename(
         columns=rename_map
@@ -1029,7 +1036,6 @@ def normalize_columns(df):
     required = [
         "product_name",
         "current_stock",
-        "sales",
     ]
 
     missing = [
@@ -1047,15 +1053,154 @@ def normalize_columns(df):
             "Required fields:\n"
             "- product_name\n"
             "- current_stock\n"
-            "- sales"
+            "- sales OR daily_sales"
+        )
+
+    if (
+        "sales" not in work.columns
+        and "daily_sales" not in work.columns
+    ):
+
+        raise ValueError(
+            "Missing sales data.\n\n"
+            "Your file must contain either:\n"
+            "- sales\n"
+            "or\n"
+            "- daily_sales"
         )
 
     return work
 
 
+def expand_daily_sales_history(df):
+
+    """
+    Converts a file containing one row per product and
+    a comma-separated daily_sales history into one row
+    per day.
+
+    Example:
+
+    product_name = Coffee Beans
+    daily_sales = 10,12,9,11
+
+    becomes:
+
+    Coffee Beans | day 1 | 10
+    Coffee Beans | day 2 | 12
+    Coffee Beans | day 3 | 9
+    Coffee Beans | day 4 | 11
+    """
+
+    if (
+        "daily_sales" not in df.columns
+        or "sales" in df.columns
+    ):
+
+        return df
+
+    expanded_rows = []
+
+    for _, row in df.iterrows():
+
+        raw_sales = row["daily_sales"]
+
+        if pd.isna(raw_sales):
+
+            sales_values = []
+
+        else:
+
+            sales_values = [
+                value.strip()
+                for value in str(
+                    raw_sales
+                ).split(",")
+                if value.strip() != ""
+            ]
+
+        if not sales_values:
+
+            sales_values = ["0"]
+
+        for index, value in enumerate(
+            sales_values
+        ):
+
+            try:
+
+                sales_value = float(
+                    value
+                )
+
+            except Exception:
+
+                sales_value = 0.0
+
+            new_row = row.copy()
+
+            new_row["sales"] = max(
+                0.0,
+                sales_value,
+            )
+
+            # Create a date for each historical
+            # sales observation.
+            new_row["date"] = (
+                pd.Timestamp.today().normalize()
+                - pd.Timedelta(
+                    days=(
+                        len(sales_values)
+                        - 1
+                        - index
+                    )
+                )
+            )
+
+            expanded_rows.append(
+                new_row
+            )
+
+    if not expanded_rows:
+
+        raise ValueError(
+            "No daily sales data could be read "
+            "from the uploaded file."
+        )
+
+    expanded = pd.DataFrame(
+        expanded_rows
+    )
+
+    expanded = expanded.drop(
+        columns=["daily_sales"],
+        errors="ignore",
+    )
+
+    return expanded
+
+
 def prepare_data(df):
 
-    work = normalize_columns(df)
+    # --------------------------------------------------------
+    # Step 1: Normalise column names
+    # --------------------------------------------------------
+
+    work = normalize_columns(
+        df
+    )
+
+    # --------------------------------------------------------
+    # Step 2: Convert daily_sales history
+    # --------------------------------------------------------
+
+    work = expand_daily_sales_history(
+        work
+    )
+
+    # --------------------------------------------------------
+    # Step 3: Clean product names
+    # --------------------------------------------------------
 
     work["product_name"] = (
         work["product_name"]
@@ -1067,12 +1212,22 @@ def prepare_data(df):
         work["product_name"].ne("")
     ].copy()
 
+    # --------------------------------------------------------
+    # Step 4: Convert numeric columns
+    # --------------------------------------------------------
+
     numeric_columns = [
+
         "current_stock",
+
         "selling_price",
+
         "cost_per_unit",
+
         "previous_cost_per_unit",
+
         "supplier_lead_time_days",
+
         "sales",
     ]
 
@@ -1085,11 +1240,19 @@ def prepare_data(df):
                 errors="coerce",
             )
 
+    # --------------------------------------------------------
+    # Step 5: Clean stock
+    # --------------------------------------------------------
+
     work["current_stock"] = (
         work["current_stock"]
         .fillna(0)
         .clip(lower=0)
     )
+
+    # --------------------------------------------------------
+    # Step 6: Clean sales
+    # --------------------------------------------------------
 
     work["sales"] = (
         work["sales"]
@@ -1097,7 +1260,14 @@ def prepare_data(df):
         .clip(lower=0)
     )
 
-    if "selling_price" not in work.columns:
+    # --------------------------------------------------------
+    # Step 7: Selling price
+    # --------------------------------------------------------
+
+    if (
+        "selling_price"
+        not in work.columns
+    ):
 
         work["selling_price"] = 0.0
 
@@ -1107,7 +1277,14 @@ def prepare_data(df):
         .clip(lower=0)
     )
 
-    if "cost_per_unit" not in work.columns:
+    # --------------------------------------------------------
+    # Step 8: Cost per unit
+    # --------------------------------------------------------
+
+    if (
+        "cost_per_unit"
+        not in work.columns
+    ):
 
         work["cost_per_unit"] = 0.0
 
@@ -1117,21 +1294,38 @@ def prepare_data(df):
         .clip(lower=0)
     )
 
-    if "previous_cost_per_unit" not in work.columns:
+    # --------------------------------------------------------
+    # Step 9: Previous cost
+    # --------------------------------------------------------
+
+    if (
+        "previous_cost_per_unit"
+        not in work.columns
+    ):
 
         work[
             "previous_cost_per_unit"
-        ] = work["cost_per_unit"]
+        ] = work[
+            "cost_per_unit"
+        ]
 
     work[
         "previous_cost_per_unit"
     ] = (
-        work["previous_cost_per_unit"]
+        work[
+            "previous_cost_per_unit"
+        ]
         .fillna(
-            work["cost_per_unit"]
+            work[
+                "cost_per_unit"
+            ]
         )
         .clip(lower=0)
     )
+
+    # --------------------------------------------------------
+    # Step 10: Supplier lead time
+    # --------------------------------------------------------
 
     if (
         "supplier_lead_time_days"
@@ -1155,6 +1349,10 @@ def prepare_data(df):
         .clip(0, 365)
     )
 
+    # --------------------------------------------------------
+    # Step 11: Dates
+    # --------------------------------------------------------
+
     if "date" in work.columns:
 
         work["date"] = pd.to_datetime(
@@ -1166,10 +1364,21 @@ def prepare_data(df):
 
         work["date"] = pd.NaT
 
+    # --------------------------------------------------------
+    # Step 12: Sort historical records
+    # --------------------------------------------------------
+
+    work = work.sort_values(
+        [
+            "product_name",
+            "date",
+        ],
+        na_position="last",
+    )
+
     return work.reset_index(
         drop=True
     )
-
 
 # ============================================================
 # 13. MONTHLY DATA SUPPORT
