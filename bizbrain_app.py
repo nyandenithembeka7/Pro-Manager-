@@ -66,8 +66,14 @@ st.set_page_config(
 )
 
 # Show logo in the sidebar/header (optional)
-st.logo("logo.png", icon_image="logo.png")
+# Option 1: Larger built-in logo
+st.logo("logo.png", icon_image="logo.png", size="medium")
 
+# OR
+
+# Option 2: Custom size with st.image()
+with st.sidebar:
+    st.image("logo.png", width=150)
 
 # ============================================================
 # 3. SAFE SECRETS (No hardcoded keys!)
