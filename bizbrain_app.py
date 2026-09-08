@@ -69,10 +69,6 @@ st.set_page_config(
 # ============================================================
 
 def get_secret(name, default=None):
-    """
-    Read from Streamlit secrets first, then environment.
-    NO hardcoded fallbacks for security!
-    """
     try:
         value = st.secrets.get(name, None)
         if value is not None:
@@ -87,7 +83,18 @@ def get_secret(name, default=None):
     return default
 
 
-SUPABASE_URL = get_secret("SUPABASE_URL")
+# Clean Supabase URL – remove www. and /rest/v1/ if present
+def clean_supabase_url(raw_url):
+    if not raw_url:
+        return raw_url
+    # Remove leading www.
+    url = re.sub(r'^https?://(?:www\.)', 'https://', raw_url)
+    # Remove trailing /rest/v1/ or /rest/v1
+    url = re.sub(r'/rest/v1/?$', '', url)
+    return url
+
+
+SUPABASE_URL = clean_supabase_url(get_secret("SUPABASE_URL"))
 SUPABASE_SECRET_KEY = get_secret("SUPABASE_SECRET_KEY")
 EMAIL_SENDER = get_secret("EMAIL_SENDER")
 EMAIL_PASSWORD = get_secret("EMAIL_PASSWORD")
@@ -98,10 +105,12 @@ MONTHLY_PRICE_ID = get_secret("MONTHLY_PRICE_ID")
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
+# Check if Supabase is enabled
 SUPABASE_ENABLED = bool(
     create_client
     and SUPABASE_URL
     and SUPABASE_SECRET_KEY
+    and "YOUR_PROJECT_ID" not in SUPABASE_URL
 )
 
 # ============================================================
@@ -119,21 +128,25 @@ def get_supabase_client():
         return None
     try:
         return create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
-    except Exception:
+    except Exception as e:
+        st.error(f"Supabase connection error: {e}")
         return None
 
 
 SUPABASE = get_supabase_client()
 
 
-@st.cache_resource
 def get_cookie_manager():
-    if stx is None:
-        return None
-    try:
-        return stx.CookieManager()
-    except Exception:
-        return None
+    """Return a CookieManager instance, stored in session_state to avoid widget caching."""
+    if "cookie_manager" not in st.session_state:
+        if stx is None:
+            st.session_state.cookie_manager = None
+        else:
+            try:
+                st.session_state.cookie_manager = stx.CookieManager()
+            except Exception:
+                st.session_state.cookie_manager = None
+    return st.session_state.cookie_manager
 
 
 COOKIE_MANAGER = get_cookie_manager()
