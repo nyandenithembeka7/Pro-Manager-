@@ -57,12 +57,14 @@ MAGIC_LINK_HOURS = 24
 MONTHLY_PRICE_DISPLAY = "R499 / month"
 
 st.set_page_config(
-    st.logo("logo.png", icon_image="logo.png")
     page_title=APP_NAME,
-    page_icon="logo.png",    # <-- custom favicon
+    page_icon="logo.png",        # <-- custom favicon
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Show logo in the sidebar/header (optional)
+st.logo("logo.png", icon_image="logo.png")
 
 
 # ============================================================
