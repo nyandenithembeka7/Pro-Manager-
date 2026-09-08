@@ -1798,6 +1798,33 @@ def main_dashboard():
 
     alerts = generate_alerts(processed)
     insights = generate_business_insights(processed)
+        # ============================================================
+    # SEASONALITY ALERT (Monthly Demand Pattern)
+    # ============================================================
+    if df is not None and not df.empty and "date" in df.columns:
+        season_df = df[["product_name", "date", "sales"]].copy()
+        season_df = season_df.dropna(subset=["date"])
+        if not season_df.empty:
+            # Extract the day of the month (1-31)
+            season_df["day_of_month"] = pd.to_datetime(season_df["date"]).dt.day
+            
+            # Calculate average sales for each day across all products
+            overall_avg = season_df.groupby("day_of_month")["sales"].mean().reset_index()
+            overall_avg = overall_avg.sort_values("sales", ascending=False)
+            
+            # Get the top 3 highest-demand days
+            top_days = overall_avg.head(3)
+            top_days_list = [str(int(row["day_of_month"])) for _, row in top_days.iterrows()]
+            top_text = ", ".join(top_days_list)
+            
+            # Add a seasonality alert/insight
+            season_alert = {
+                "priority": "🟢 OPPORTUNITY",
+                "title": "📅 Monthly Demand Pattern Detected",
+                "description": f"Demand typically peaks around the **{top_text}** of the month.",
+                "impact": "Plan your stock orders and promotions around these peak days."
+            }
+            alerts.append(season_alert)
 
     st.divider()
     total_inventory_value = processed["stock_value"].sum()
@@ -1912,6 +1939,51 @@ def main_dashboard():
             })
         forecast_df = pd.DataFrame(forecast_rows)
         st.dataframe(forecast_df, use_container_width=True, hide_index=True)
+                # ============================================================
+        # NEW: Monthly Pattern Detection (Seasonality)
+        # ============================================================
+        st.divider()
+        with st.expander("📅 Monthly Demand Patterns (Seasonality)", expanded=False):
+            st.caption("Analyze which days of the month usually have the highest demand.")
+            
+            # Check if we have date data to analyze
+            if df is not None and not df.empty and "date" in df.columns:
+                # Make a copy to work with
+                season_df = df[["product_name", "date", "sales"]].copy()
+                # Drop rows with missing dates
+                season_df = season_df.dropna(subset=["date"])
+                
+                if not season_df.empty:
+                    # Extract the day of the month (1-31)
+                    season_df["day_of_month"] = pd.to_datetime(season_df["date"]).dt.day
+                    
+                    # Calculate average sales for each day of the month across all products
+                    overall_avg = season_df.groupby("day_of_month")["sales"].mean().reset_index()
+                    overall_avg = overall_avg.sort_values("sales", ascending=False)
+                    
+                    # Get the top 3 highest-demand days
+                    top_days = overall_avg.head(3)
+                    top_days_list = [f"{int(row['day_of_month'])}th" for _, row in top_days.iterrows()]
+                    top_text = ", ".join(top_days_list)
+                    
+                    st.info(f"📊 **Demand typically peaks around the {top_text} of the month.**")
+                    
+                    # Show a bar chart of demand by day of month
+                    fig, ax = plt.subplots(figsize=(12, 4))
+                    ax.bar(overall_avg["day_of_month"], overall_avg["sales"], color='skyblue')
+                    ax.set_xlabel("Day of Month")
+                    ax.set_ylabel("Average Sales (All Products)")
+                    ax.set_title("Average Demand by Day of Month")
+                    ax.grid(axis='y', linestyle='--', alpha=0.4)
+                    st.pyplot(fig)
+                    
+                    # Optional: Show the top 5 products with the strongest seasonality
+                    st.caption("💡 *This helps you plan for end-of-month rushes or mid-month dips.*")
+                    
+                else:
+                    st.info("📭 Not enough date-specific data to analyze monthly patterns. Upload more historical data with dates.")
+            else:
+                st.info("📭 Upload data with a 'date' column to see monthly demand patterns.")
 
     with pos_tab:
         pos_connection_ui()
