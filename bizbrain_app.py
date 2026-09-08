@@ -55,6 +55,8 @@ APP_URL = "https://pro-manager.streamlit.app"
 TRIAL_DAYS = 30
 MAGIC_LINK_HOURS = 24
 MONTHLY_PRICE_DISPLAY = "R499 / month"
+# SUPER ADMIN - Free forever access
+SUPER_ADMINS = ["nyandenithembeka7@gmail.com", "your-other-email@example.com"]  # <-- ADD YOUR EMAIL HERE
 
 st.set_page_config(
     page_title=APP_NAME,
@@ -304,6 +306,10 @@ def login_user(email, password):
 
 
 def get_user_status(email):
+    # SUPER ADMIN: Always active, never expires
+    if email in SUPER_ADMINS:
+        return "active"
+    
     user = get_user(email)
     if not user:
         return "inactive"
@@ -314,8 +320,11 @@ def get_user_status(email):
         return "inactive"
     return status
 
-
 def get_trial_days_left(email):
+    # SUPER ADMIN: No trial, unlimited access
+    if email in SUPER_ADMINS:
+        return 9999  # Big number = "never expires"
+    
     user = get_user(email)
     if not user:
         return 0
