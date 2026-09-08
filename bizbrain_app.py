@@ -1655,13 +1655,70 @@ def data_source_sidebar(email):
                 return memory, "Business Memory"
             st.info("Upload a CSV or Excel file to analyse and remember your business.")
             return generate_demo_data(), "Demo Business - Waiting for Upload"
-        try:
+                try:
             raw = load_uploaded_file(uploaded)
             monthly_columns = detect_monthly_columns(raw)
             if monthly_columns:
                 st.info("Monthly sales columns detected. They will be converted into a sales estimate for analysis.")
                 raw = convert_monthly_data(raw)
             cleaned = prepare_data(raw)
+            
+            # ============================================================
+            # NEW: Optional Supplier Lead Time Prompt
+            # ============================================================
+            # Check if the user's file actually had a lead time column
+            # (If prepare_data added the default 5s, we check the raw columns)
+            if 'supplier_lead_time_days' not in raw.columns:
+                st.divider()
+                st.info("📦 **Optional: Set Supplier Lead Times**")
+                st.caption("We noticed your file doesn't have a 'supplier_lead_time_days' column. ")
+                st.caption("Enter delivery times below (optional), or **skip** to use the default **5 days** for all products.")
+                
+                # Get unique product names
+                products = cleaned['product_name'].unique()
+                
+                # Create a dictionary to store the inputs
+                lead_inputs = {}
+                
+                # Display products in 2 columns for a cleaner look
+                cols = st.columns(2)
+                for i, product in enumerate(products):
+                    with cols[i % 2]:
+                        lead_inputs[product] = st.number_input(
+                            f"⏱️ {product}", 
+                            min_value=0, 
+                            max_value=60, 
+                            value=5, 
+                            step=1,
+                            key=f"lead_{product}_{i}_{uploaded.name}"  # Unique key per upload
+                        )
+                
+                # Buttons to proceed
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    apply_lead = st.button("✅ Apply These Lead Times")
+                with col_btn2:
+                    skip_lead = st.button("⏩ Skip (Use 5 Days Default)")
+                
+                if apply_lead:
+                    # Update the dataframe with custom lead times
+                    for product, days in lead_inputs.items():
+                        cleaned.loc[cleaned['product_name'] == product, 'supplier_lead_time_days'] = days
+                    st.success(f"✅ Applied custom lead times to {len(products)} products!")
+                    st.caption("Proceeding to save data...")
+                    # Continue to saving...
+                elif skip_lead:
+                    st.info("✅ Using default 5 days for all products. You can change this later by adding a 'supplier_lead_time_days' column to your file.")
+                    # Just continue without modifying the df (it already has 5s from prepare_data)
+                else:
+                    # If they haven't clicked anything yet, stop here so they can decide
+                    st.stop()  # This halts execution so the user can choose before saving.
+            
+            # ============================================================
+            # END OF LEAD TIME PROMPT
+            # ============================================================
+            
+            # Now save the data (whether they applied lead times or skipped)
             saved, save_message = save_business_history(email, cleaned)
             if saved:
                 st.success(f"Loaded {uploaded.name} and saved it to Business Memory.")
