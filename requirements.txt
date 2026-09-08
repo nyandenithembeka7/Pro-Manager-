@@ -4,3 +4,5 @@ bcrypt
 stripe
 requests
 openpyxl
+supabase
+extra-streamlit-components
