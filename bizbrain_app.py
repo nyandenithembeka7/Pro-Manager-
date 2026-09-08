@@ -1538,7 +1538,7 @@ def render_custom_api_connection():
 # ============================================================
 
 def auth_page():
-    st.title(f"🧠 {APP_NAME}")
+    st.title(APP_NAME)
     st.caption("AI-powered business intelligence.")
     st.markdown("""
         ### Turn your business data into decisions.
@@ -1681,7 +1681,7 @@ def main_dashboard():
     status = get_user_status(email)
     trial_days = get_trial_days_left(email)
 
-    st.title(f"🧠 {APP_NAME}")
+    st.title(APP_NAME)
     st.caption("Your AI-powered business manager.")
 
     df, source_label = data_source_sidebar(email)
