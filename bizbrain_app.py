@@ -1655,7 +1655,7 @@ def data_source_sidebar(email):
                 return memory, "Business Memory"
             st.info("Upload a CSV or Excel file to analyse and remember your business.")
             return generate_demo_data(), "Demo Business - Waiting for Upload"
-                try:
+        try:
             raw = load_uploaded_file(uploaded)
             monthly_columns = detect_monthly_columns(raw)
             if monthly_columns:
